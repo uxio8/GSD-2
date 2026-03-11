@@ -1,10 +1,6 @@
 
-# ── GSD baseline (auto-generated) ──
-.gsd/activity/
-.gsd/runtime/
-.gsd/auto.lock
-.gsd/metrics.json
-.gsd/STATE.md
+# ── GSD (user project artifacts — never commit) ──
+.gsd/
 .DS_Store
 Thumbs.db
 *.swp
@@ -36,7 +32,6 @@ tmp/
 dist/
 .bg_shell
 .gsd*.tgz
-.gsd
 .artifacts/
 AGENTS.md
 !src/resources/AGENTS.md

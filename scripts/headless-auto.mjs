@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { agentDir, sessionsDir, authFilePath } from "../dist/app-paths.js";
 import { prepareCloudPoolSession } from "../dist/cloud-pool.js";
 import { buildResourceLoader, initResources } from "../dist/resource-loader.js";
+import { ensureManagedTools } from "../dist/tool-bootstrap.js";
 import { loadStoredEnvKeys } from "../dist/wizard.js";
 import { parseStateSnapshot, isTerminalState } from "./headless-auto-state.mjs";
 
@@ -117,8 +118,8 @@ function applyDefaultModelSettings(settingsManager, modelRegistry, poolActive) {
 
   if (!effectiveModel || !effectiveExists) {
     const preferred =
-      allModels.find((m) => m.provider === "anthropic" && m.id === "claude-sonnet-4-6") ||
-      allModels.find((m) => m.provider === "anthropic" && m.id.includes("sonnet")) ||
+      allModels.find((m) => m.provider === "anthropic" && m.id === "claude-opus-4-6") ||
+      allModels.find((m) => m.provider === "anthropic" && m.id.includes("opus")) ||
       allModels.find((m) => m.provider === "anthropic");
     if (preferred) {
       settingsManager.setDefaultModelAndProvider(preferred.provider, preferred.id);
@@ -127,7 +128,7 @@ function applyDefaultModelSettings(settingsManager, modelRegistry, poolActive) {
 
   if (settingsManager.getQuietStartup() !== true) settingsManager.setQuietStartup(true);
   if (settingsManager.getCollapseChangelog() !== true) settingsManager.setCollapseChangelog(true);
-  if (settingsManager.getDefaultThinkingLevel() !== "off" && !configuredExists) {
+  if (settingsManager.getDefaultThinkingLevel() !== "off" && !effectiveExists) {
     settingsManager.setDefaultThinkingLevel("off");
   }
 }
@@ -144,6 +145,7 @@ await ensureRuntimeEnv();
 setVersionEnv();
 setWorkflowEnv();
 process.chdir(cwd);
+ensureManagedTools(join(agentDir, "bin"));
 
 const cloudPoolSession = await prepareCloudPoolSession(cwd, authFilePath);
 const authStorage = cloudPoolSession.authStorage;
@@ -153,7 +155,9 @@ const modelRegistry = new ModelRegistry(authStorage);
 const settingsManager = SettingsManager.create(agentDir);
 applyDefaultModelSettings(settingsManager, modelRegistry, cloudPoolSession.poolActive);
 
-const sessionManager = SessionManager.create(cwd, sessionsDir);
+const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+const projectSessionsDir = join(sessionsDir, safePath);
+const sessionManager = SessionManager.create(cwd, projectSessionsDir);
 initResources(agentDir);
 const resourceLoader = buildResourceLoader(agentDir);
 await resourceLoader.reload();
@@ -168,6 +172,42 @@ const { session, extensionsResult } = await createAgentSession({
 
 for (const err of extensionsResult.errors) {
   log(`extension-error ${err.path}: ${err.error}`);
+}
+
+const enabledModelPatterns = settingsManager.getEnabledModels();
+if (enabledModelPatterns && enabledModelPatterns.length > 0) {
+  const availableModels = modelRegistry.getAvailable();
+  const scopedModels = [];
+  const seen = new Set();
+
+  for (const pattern of enabledModelPatterns) {
+    const slashIdx = pattern.indexOf("/");
+    if (slashIdx !== -1) {
+      const provider = pattern.substring(0, slashIdx);
+      const modelId = pattern.substring(slashIdx + 1);
+      const model = availableModels.find((m) => m.provider === provider && m.id === modelId);
+      if (model) {
+        const key = `${model.provider}/${model.id}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          scopedModels.push({ model });
+        }
+      }
+    } else {
+      const model = availableModels.find((m) => m.id === pattern);
+      if (model) {
+        const key = `${model.provider}/${model.id}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          scopedModels.push({ model });
+        }
+      }
+    }
+  }
+
+  if (scopedModels.length > 0 && scopedModels.length < availableModels.length) {
+    session.setScopedModels(scopedModels);
+  }
 }
 
 session.subscribe((event) => {

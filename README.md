@@ -46,6 +46,28 @@ GSD v2 solves all of these because it's not a prompt framework anymore — it's 
 | Roadmap reassessment | Manual | Automatic after each slice completes |
 | Skill discovery | None | Auto-detect and install relevant skills during research |
 
+### Migrating from v1
+
+If you have projects with `.planning` directories from the original Get Shit Done, you can migrate them to GSD-2's `.gsd` format:
+
+```bash
+# From within the project directory
+/gsd migrate
+
+# Or specify a path
+/gsd migrate ~/projects/my-old-project
+```
+
+The migration tool:
+- Parses your old `PROJECT.md`, `ROADMAP.md`, `REQUIREMENTS.md`, phase directories, plans, summaries, and research
+- Maps phases → slices, plans → tasks, milestones → milestones
+- Preserves completion state (`[x]` phases stay done, summaries carry over)
+- Consolidates research files into the new structure
+- Shows a preview before writing anything
+- Optionally runs an agent-driven review of the output for quality assurance
+
+Supports format variations including milestone-sectioned roadmaps with `<details>` blocks, bold phase entries, bullet-format requirements, decimal phase numbering, and duplicate phase numbers across milestones.
+
 ---
 
 ## How It Works
@@ -212,6 +234,7 @@ On first run, GSD prompts for optional API keys (Brave Search, Context7, Jina) f
 | `/gsd status` | Progress dashboard |
 | `/gsd queue` | Queue future milestones (safe during auto mode) |
 | `/gsd prefs` | Model selection, timeouts, budget ceiling |
+| `/gsd migrate` | Migrate a v1 `.planning` directory to `.gsd` format |
 | `/gsd doctor` | Validate `.gsd/` integrity, find and fix issues |
 | `Ctrl+Alt+G` | Toggle dashboard overlay |
 
@@ -220,7 +243,7 @@ On first run, GSD prompts for optional API keys (Brave Search, Context7, Jina) f
 For a simple background runner plus log/state follow-up, this repo now ships two local helpers:
 
 ```bash
-cd /Users/uxiomarcosmacmini/Documents/desarrollos/GSD-2
+# From the GSD repo root
 bash scripts/auto-monitor.sh start /path/to/project
 ```
 
@@ -436,7 +459,13 @@ Use expensive models where quality matters (planning, complex execution) and che
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=gsd-build/GSD-2&type=Date)](https://star-history.com/#gsd-build/GSD-2&Date)
+<a href="https://star-history.com/#gsd-build/gsd-2&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=gsd-build/gsd-2&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=gsd-build/gsd-2&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=gsd-build/gsd-2&type=Date" />
+ </picture>
+</a>
 
 ---
 

@@ -26,6 +26,17 @@ async function promptMasked(label: string, hint: string): Promise<string> {
       process.stdin.resume()
       process.stdin.setEncoding('utf8')
       let value = ''
+      const redraw = () => {
+        process.stdout.clearLine(0)
+        process.stdout.cursorTo(0)
+        if (value.length === 0) {
+          process.stdout.write('  ')
+        } else {
+          const dots = '●'.repeat(Math.min(value.length, 24))
+          const counter = value.length > 24 ? ` ${dim}(${value.length})${reset}` : ` ${dim}${value.length}${reset}`
+          process.stdout.write(`  ${dots}${counter}`)
+        }
+      }
       const handler = (ch: string) => {
         if (ch === '\r' || ch === '\n') {
           process.stdin.setRawMode(false)
@@ -37,16 +48,14 @@ async function promptMasked(label: string, hint: string): Promise<string> {
           process.stdin.setRawMode(false)
           process.stdout.write('\n')
           process.exit(0)
-        } else if (ch === '\u007f') {
+        } else if (ch === '\u007f' || ch === '\b') {
           if (value.length > 0) {
             value = value.slice(0, -1)
           }
-          process.stdout.clearLine(0)
-          process.stdout.cursorTo(0)
-          process.stdout.write('  ' + '*'.repeat(value.length))
+          redraw()
         } else {
           value += ch
-          process.stdout.write('*')
+          redraw()
         }
       }
       process.stdin.on('data', handler)
@@ -78,7 +87,7 @@ export function loadStoredEnvKeys(authStorage: AuthStorage): void {
   for (const [provider, envVar] of providers) {
     if (!process.env[envVar]) {
       const cred = authStorage.get(provider)
-      if (cred?.type === 'api_key') {
+      if (cred?.type === 'api_key' && cred.key) {
         process.env[envVar] = cred.key as string
       }
     }
@@ -167,6 +176,7 @@ export async function runWizardIfNeeded(authStorage: AuthStorage): Promise<void>
       process.stdout.write(`  ${green}✓${reset} ${key.label} saved\n\n`)
       savedCount++
     } else {
+      authStorage.set(key.provider, { type: 'api_key', key: '' })
       process.stdout.write(`  ${dim}↷  ${key.label} skipped${reset}\n\n`)
     }
   }

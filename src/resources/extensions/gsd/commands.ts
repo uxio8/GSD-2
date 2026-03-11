@@ -30,6 +30,7 @@ import {
   filterDoctorIssues,
 } from "./doctor.js";
 import { loadPrompt } from "./prompt-loader.js";
+import { handleMigrate } from "./migrate/command.js";
 
 function dispatchDoctorHeal(pi: ExtensionAPI, scope: string | undefined, reportText: string, structuredIssues: string): void {
   const workflowPath = process.env.GSD_WORKFLOW_PATH ?? join(process.env.HOME ?? "~", ".pi", "GSD-WORKFLOW.md");
@@ -51,10 +52,10 @@ function dispatchDoctorHeal(pi: ExtensionAPI, scope: string | undefined, reportT
 
 export function registerGSDCommand(pi: ExtensionAPI): void {
   pi.registerCommand("gsd", {
-    description: "GSD — Get Stuff Done: /gsd auto|stop|status|queue|prefs|doctor",
+    description: "GSD — Get Shit Done: /gsd auto|stop|status|queue|prefs|doctor|migrate",
 
     getArgumentCompletions: (prefix: string) => {
-      const subcommands = ["auto", "stop", "status", "queue", "discuss", "prefs", "doctor"];
+      const subcommands = ["auto", "stop", "status", "queue", "discuss", "prefs", "doctor", "migrate"];
       const parts = prefix.trim().split(/\s+/);
 
       if (parts.length <= 1) {
@@ -136,13 +137,18 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
         return;
       }
 
+      if (trimmed === "migrate" || trimmed.startsWith("migrate ")) {
+        await handleMigrate(trimmed.replace(/^migrate\s*/, "").trim(), ctx, pi);
+        return;
+      }
+
       if (trimmed === "") {
         await showSmartEntry(ctx, pi, process.cwd());
         return;
       }
 
       ctx.ui.notify(
-        `Unknown: /gsd ${trimmed}. Use /gsd, /gsd auto, /gsd stop, /gsd status, /gsd queue, /gsd discuss, /gsd prefs [global|project|status], or /gsd doctor [audit|fix|heal] [M###/S##].`,
+        `Unknown: /gsd ${trimmed}. Use /gsd, /gsd auto, /gsd stop, /gsd status, /gsd queue, /gsd discuss, /gsd prefs [global|project|status], /gsd doctor [audit|fix|heal] [M###/S##], or /gsd migrate <path>.`,
         "warning",
       );
     },

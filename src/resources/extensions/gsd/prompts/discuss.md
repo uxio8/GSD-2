@@ -1,6 +1,8 @@
 {{preamble}}
 
-Say exactly: "What's the vision?" — nothing else. Wait for the user's answer.
+Ask: "What's the vision?" once, and then use whatever the user replies with as the vision input to continue.
+
+Special handling: if the user message is not a project description (for example, they ask about status, branch state, or other clarifications), treat it as the vision input and proceed with discussion logic instead of repeating "What's the vision?".
 
 ## Discussion Phase
 

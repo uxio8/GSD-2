@@ -21,7 +21,7 @@ import type {
  * Split markdown content into frontmatter (YAML-like) and body.
  * Returns [frontmatterLines, body] where frontmatterLines is null if no frontmatter.
  */
-function splitFrontmatter(content: string): [string[] | null, string] {
+export function splitFrontmatter(content: string): [string[] | null, string] {
   const trimmed = content.trimStart();
   if (!trimmed.startsWith('---')) return [null, content];
 
@@ -42,7 +42,7 @@ function splitFrontmatter(content: string): [string[] | null, string] {
  * Handles simple scalars and arrays (lines starting with "  - ").
  * Handles nested objects like requires (lines with "    key: value").
  */
-function parseFrontmatterMap(lines: string[]): Record<string, unknown> {
+export function parseFrontmatterMap(lines: string[]): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   let currentKey: string | null = null;
   let currentArray: unknown[] | null = null;
@@ -124,7 +124,7 @@ function parseFrontmatterMap(lines: string[]): Record<string, unknown> {
 }
 
 /** Extract the text after a heading at a given level, up to the next heading of same or higher level. */
-function extractSection(body: string, heading: string, level: number = 2): string | null {
+export function extractSection(body: string, heading: string, level: number = 2): string | null {
   const prefix = '#'.repeat(level) + ' ';
   const regex = new RegExp(`^${prefix}${escapeRegex(heading)}\\s*$`, 'm');
   const match = regex.exec(body);
@@ -140,7 +140,7 @@ function extractSection(body: string, heading: string, level: number = 2): strin
 }
 
 /** Extract all sections at a given level, returning heading → content map. */
-function extractAllSections(body: string, level: number = 2): Map<string, string> {
+export function extractAllSections(body: string, level: number = 2): Map<string, string> {
   const prefix = '#'.repeat(level) + ' ';
   const regex = new RegExp(`^${prefix}(.+)$`, 'gm');
   const sections = new Map<string, string>();
@@ -161,14 +161,14 @@ function escapeRegex(s: string): string {
 }
 
 /** Parse bullet list items from a text block. */
-function parseBullets(text: string): string[] {
+export function parseBullets(text: string): string[] {
   return text.split('\n')
     .map(l => l.replace(/^\s*[-*]\s+/, '').trim())
     .filter(l => l.length > 0 && !l.startsWith('#'));
 }
 
 /** Extract key: value from bold-prefixed lines like "**Key:** Value" */
-function extractBoldField(text: string, key: string): string | null {
+export function extractBoldField(text: string, key: string): string | null {
   const regex = new RegExp(`^\\*\\*${escapeRegex(key)}:\\*\\*\\s*(.+)$`, 'm');
   const match = regex.exec(text);
   return match ? match[1].trim() : null;
@@ -548,7 +548,7 @@ export function parseRequirementCounts(content: string | null): RequirementCount
   for (const section of sections) {
     const text = extractSection(content, section.heading, 2);
     if (!text) continue;
-    const matches = text.match(/^###\s+R\d+\s+—/gm);
+    const matches = text.match(/^###\s+[A-Z][\w-]*\d+\s+—/gm);
     counts[section.key] = matches ? matches.length : 0;
   }
 
