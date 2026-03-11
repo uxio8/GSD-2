@@ -138,6 +138,31 @@ GSD auto-selects a default model after login. To switch models later:
 /model
 ```
 
+### Use `codex-pool-cloud`
+
+If you want GSD to run on the shared Codex subscription pool from [`codex-pool-cloud`](https://github.com/gsd-build/codex-pool-cloud), start it with the pool env vars:
+
+```bash
+POOL_URL=https://pool.example.com \
+POOL_TOKEN=pool-use-token \
+POOL_SLUG=main \
+gsd
+```
+
+GSD also accepts `GSD_CLOUD_POOL_URL`, `GSD_CLOUD_POOL_TOKEN`, and `GSD_CLOUD_POOL_SLUG`. On startup it acquires a lease, translates the leased Codex auth into Pi's `openai-codex` OAuth format for the current session, renews while GSD is running, and releases the lease on exit. Your local `~/.gsd/agent/auth.json` stays untouched. If your current default model is unavailable, GSD prefers `openai-codex/gpt-5.4` automatically while the pool is active.
+
+For always-on local use, GSD also auto-loads pool credentials from `~/.gsd/cloud-pool.env`. If that file does not exist, it tries the sibling repo secret file `../codex-pool-cloud/.secrets/friend_pool_use.env` automatically.
+
+If you want Codex `gpt-5.4` to use OpenAI's fast mode by default, add this to `~/.gsd/agent/settings.json`:
+
+```json
+{
+  "service_tier": "fast"
+}
+```
+
+GSD injects `service_tier: "fast"` only for `openai-codex/gpt-5.4*` requests backed by OAuth/ChatGPT login (including `codex-pool-cloud`). `standard`, `default`, or `auto` leave the request on the normal lane. You can override it per shell with `GSD_CODEX_SPEED=fast|standard` or `GSD_CODEX_SERVICE_TIER=fast|standard`.
+
 ### Use it
 
 Open a terminal in your project and run:
@@ -189,6 +214,28 @@ On first run, GSD prompts for optional API keys (Brave Search, Context7, Jina) f
 | `/gsd prefs` | Model selection, timeouts, budget ceiling |
 | `/gsd doctor` | Validate `.gsd/` integrity, find and fix issues |
 | `Ctrl+Alt+G` | Toggle dashboard overlay |
+
+### Headless Auto + Monitoring
+
+For a simple background runner plus log/state follow-up, this repo now ships two local helpers:
+
+```bash
+cd /Users/uxiomarcosmacmini/Documents/desarrollos/GSD-2
+bash scripts/auto-monitor.sh start /path/to/project
+```
+
+What you get:
+
+- background headless auto runner via `scripts/headless-auto.mjs`
+- pid file at `.gsd/headless-auto.pid`
+- activity log at `.gsd/auto-run.log`
+- quick status via:
+
+```bash
+bash scripts/auto-monitor.sh status /path/to/project
+bash scripts/auto-monitor.sh tail /path/to/project
+bash scripts/auto-monitor.sh stop /path/to/project
+```
 
 ---
 

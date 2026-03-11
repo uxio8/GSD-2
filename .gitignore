@@ -39,3 +39,4 @@ dist/
 .gsd
 .artifacts/
 AGENTS.md
+!src/resources/AGENTS.md

@@ -7,10 +7,12 @@ import {
   InteractiveMode,
 } from '@mariozechner/pi-coding-agent'
 import { agentDir, sessionsDir, authFilePath } from './app-paths.js'
+import { prepareCloudPoolSession } from './cloud-pool.js'
 import { buildResourceLoader, initResources } from './resource-loader.js'
 import { loadStoredEnvKeys, runWizardIfNeeded } from './wizard.js'
 
-const authStorage = AuthStorage.create(authFilePath)
+const cloudPoolSession = await prepareCloudPoolSession(process.cwd(), authFilePath)
+const authStorage = cloudPoolSession.authStorage
 loadStoredEnvKeys(authStorage)
 await runWizardIfNeeded(authStorage)
 
@@ -23,10 +25,27 @@ const settingsManager = SettingsManager.create(agentDir)
 const configuredProvider = settingsManager.getDefaultProvider()
 const configuredModel = settingsManager.getDefaultModel()
 const allModels = modelRegistry.getAll()
+const availableModels = modelRegistry.getAvailable()
 const configuredExists = configuredProvider && configuredModel &&
   allModels.some((m) => m.provider === configuredProvider && m.id === configuredModel)
+const configuredAvailable = configuredProvider && configuredModel &&
+  availableModels.some((m) => m.provider === configuredProvider && m.id === configuredModel)
 
-if (!configuredModel || !configuredExists) {
+if (cloudPoolSession.poolActive && !configuredAvailable) {
+  const pooledDefault =
+    availableModels.find((m) => m.provider === 'openai-codex' && m.id === 'gpt-5.4') ||
+    availableModels.find((m) => m.provider === 'openai-codex')
+  if (pooledDefault) {
+    settingsManager.setDefaultModelAndProvider(pooledDefault.provider, pooledDefault.id)
+  }
+}
+
+const effectiveProvider = settingsManager.getDefaultProvider()
+const effectiveModel = settingsManager.getDefaultModel()
+const effectiveExists = effectiveProvider && effectiveModel &&
+  allModels.some((m) => m.provider === effectiveProvider && m.id === effectiveModel)
+
+if (!effectiveModel || !effectiveExists) {
   // Preferred default: anthropic/claude-sonnet-4-6
   const preferred =
     allModels.find((m) => m.provider === 'anthropic' && m.id === 'claude-sonnet-4-6') ||
@@ -38,7 +57,7 @@ if (!configuredModel || !configuredExists) {
 }
 
 // Default thinking level: off (always reset if not explicitly set)
-if (settingsManager.getDefaultThinkingLevel() !== 'off' && !configuredExists) {
+if (settingsManager.getDefaultThinkingLevel() !== 'off' && !effectiveExists) {
   settingsManager.setDefaultThinkingLevel('off')
 }
 
@@ -72,5 +91,9 @@ if (extensionsResult.errors.length > 0) {
   }
 }
 
-const interactiveMode = new InteractiveMode(session)
-await interactiveMode.run()
+try {
+  const interactiveMode = new InteractiveMode(session)
+  await interactiveMode.run()
+} finally {
+  await cloudPoolSession.cleanup()
+}

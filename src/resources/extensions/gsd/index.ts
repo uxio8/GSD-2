@@ -31,6 +31,7 @@ import { isAutoActive, isAutoPaused, handleAgentEnd, pauseAuto, getAutoDashboard
 import { saveActivityLog } from "./activity-log.js";
 import { checkAutoStartAfterDiscuss } from "./guided-flow.js";
 import { GSDDashboardOverlay } from "./dashboard-overlay.js";
+import { applyCodexFastMode, resolveCodexSpeed } from "./codex-speed.js";
 import {
   loadEffectiveGSDPreferences,
   renderPreferencesForSystemPrompt,
@@ -143,6 +144,17 @@ export default function (pi: ExtensionAPI) {
         }
         : {}),
     };
+  });
+
+  // ── before_provider_request: inject Codex fast mode when configured ─────
+  pi.on("before_provider_request", async (event, ctx: ExtensionContext) => {
+    const speed = resolveCodexSpeed(ctx.cwd);
+    return applyCodexFastMode(
+      event.payload,
+      ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined,
+      !!ctx.model && ctx.modelRegistry.isUsingOAuth(ctx.model),
+      speed,
+    );
   });
 
   // ── agent_end: auto-mode advancement or auto-start after discuss ───────────
