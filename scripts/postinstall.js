@@ -35,6 +35,14 @@ const banner =
 
 process.stderr.write(banner)
 
+// Apply patches to upstream dependencies (non-fatal)
+try {
+  execSync('npx patch-package', { stdio: 'inherit', cwd: resolve(__dirname, '..') })
+  process.stderr.write(`\n  ${green}✓${reset} Patches applied\n`)
+} catch {
+  process.stderr.write(`\n  ${yellow}⚠${reset}  Failed to apply patches — run ${cyan}npx patch-package${reset} manually\n`)
+}
+
 // Install Playwright chromium for browser tools (non-fatal)
 const args = os.platform() === 'linux' ? '--with-deps' : ''
 try {
