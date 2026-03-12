@@ -2,6 +2,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import type { GitPreferences } from "./git-service.ts";
+import { VALID_BRANCH_NAME } from "./git-service.ts";
 
 const GLOBAL_PREFERENCES_PATH = join(homedir(), ".gsd", "preferences.md");
 const LEGACY_GLOBAL_PREFERENCES_PATH = join(homedir(), ".pi", "agent", "gsd-preferences.md");
@@ -31,6 +33,13 @@ export interface AutoSupervisorConfig {
   hard_timeout_minutes?: number;
 }
 
+export interface RemoteQuestionsConfig {
+  channel: "slack" | "discord";
+  channel_id: string | number;
+  timeout_minutes?: number;
+  poll_interval_seconds?: number;
+}
+
 export interface GSDPreferences {
   version?: number;
   always_use_skills?: string[];
@@ -43,6 +52,8 @@ export interface GSDPreferences {
   auto_supervisor?: AutoSupervisorConfig;
   uat_dispatch?: boolean;
   budget_ceiling?: number;
+  remote_questions?: RemoteQuestionsConfig;
+  git?: GitPreferences;
 }
 
 export interface LoadedGSDPreferences {
@@ -430,7 +441,11 @@ function parseFrontmatterBlock(frontmatter: string): GSDPreferences {
 function parseScalar(value: string): string | number | boolean {
   if (value === "true") return true;
   if (value === "false") return false;
-  if (/^-?\d+$/.test(value)) return Number(value);
+  if (/^-?\d+$/.test(value)) {
+    const n = Number(value);
+    if (Number.isSafeInteger(n)) return n;
+    return value;
+  }
   return value.replace(/^['\"]|['\"]$/g, "");
 }
 
@@ -495,6 +510,12 @@ function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPr
     auto_supervisor: { ...(base.auto_supervisor ?? {}), ...(override.auto_supervisor ?? {}) },
     uat_dispatch: override.uat_dispatch ?? base.uat_dispatch,
     budget_ceiling: override.budget_ceiling ?? base.budget_ceiling,
+    remote_questions: override.remote_questions
+      ? { ...(base.remote_questions ?? {}), ...override.remote_questions }
+      : base.remote_questions,
+    git: (base.git || override.git)
+      ? { ...(base.git ?? {}), ...(override.git ?? {}) }
+      : undefined,
   };
 }
 
@@ -575,6 +596,58 @@ function validatePreferences(preferences: GSDPreferences): {
       validated.budget_ceiling = Number(raw);
     } else {
       errors.push("budget_ceiling must be a finite number");
+    }
+  }
+
+  if (preferences.git && typeof preferences.git === "object") {
+    const g = preferences.git as Record<string, unknown>;
+    const git: Record<string, unknown> = {};
+
+    if (g.auto_push !== undefined) {
+      if (typeof g.auto_push === "boolean") git.auto_push = g.auto_push;
+      else errors.push("git.auto_push must be a boolean");
+    }
+    if (g.push_branches !== undefined) {
+      if (typeof g.push_branches === "boolean") git.push_branches = g.push_branches;
+      else errors.push("git.push_branches must be a boolean");
+    }
+    if (g.remote !== undefined) {
+      if (typeof g.remote === "string" && g.remote.trim() !== "") git.remote = g.remote.trim();
+      else errors.push("git.remote must be a non-empty string");
+    }
+    if (g.snapshots !== undefined) {
+      if (typeof g.snapshots === "boolean") git.snapshots = g.snapshots;
+      else errors.push("git.snapshots must be a boolean");
+    }
+    if (g.pre_merge_check !== undefined) {
+      if (typeof g.pre_merge_check === "boolean") {
+        git.pre_merge_check = g.pre_merge_check;
+      } else if (typeof g.pre_merge_check === "string" && g.pre_merge_check.trim() !== "") {
+        git.pre_merge_check = g.pre_merge_check.trim();
+      } else {
+        errors.push("git.pre_merge_check must be a boolean or a non-empty string command");
+      }
+    }
+    if (g.commit_type !== undefined) {
+      const validCommitTypes = new Set([
+        "feat", "fix", "refactor", "docs", "test", "chore", "perf", "ci", "build", "style",
+      ]);
+      if (typeof g.commit_type === "string" && validCommitTypes.has(g.commit_type)) {
+        git.commit_type = g.commit_type;
+      } else {
+        errors.push("git.commit_type must be one of: feat, fix, refactor, docs, test, chore, perf, ci, build, style");
+      }
+    }
+    if (g.main_branch !== undefined) {
+      if (typeof g.main_branch === "string" && g.main_branch.trim() !== "" && VALID_BRANCH_NAME.test(g.main_branch)) {
+        git.main_branch = g.main_branch;
+      } else {
+        errors.push("git.main_branch must be a valid branch name (alphanumeric, _, -, /, .)");
+      }
+    }
+
+    if (Object.keys(git).length > 0) {
+      validated.git = git as GitPreferences;
     }
   }
 

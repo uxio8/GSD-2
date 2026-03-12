@@ -147,6 +147,10 @@ async function updateStateFile(basePath: string, fixesApplied: string[]): Promis
   fixesApplied.push(`updated ${path}`);
 }
 
+export async function rebuildState(basePath: string): Promise<void> {
+  await updateStateFile(basePath, []);
+}
+
 async function ensureSliceSummaryStub(basePath: string, milestoneId: string, sliceId: string, fixesApplied: string[]): Promise<void> {
   const path = join(resolveSlicePath(basePath, milestoneId, sliceId) ?? relSlicePath(basePath, milestoneId, sliceId), `${sliceId}-SUMMARY.md`);
   const absolute = resolveSliceFile(basePath, milestoneId, sliceId, "SUMMARY") ?? join(resolveSlicePath(basePath, milestoneId, sliceId)!, `${sliceId}-SUMMARY.md`);
@@ -680,4 +684,3 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
     fixesApplied,
   };
 }
-

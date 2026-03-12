@@ -5,9 +5,12 @@ import { execSync } from "node:child_process";
 
 import {
   createWorktree,
+  diffWorktreeAll,
+  diffWorktreeNumstat,
   listWorktrees,
   removeWorktree,
   diffWorktreeGSD,
+  getWorktreeCodeDiff,
   getWorktreeGSDDiff,
   getWorktreeLog,
   worktreeBranchName,
@@ -122,6 +125,23 @@ async function main(): Promise<void> {
   assert(diff.modified.some(f => f.includes("M001")), "M001 roadmap is in modified");
   assertEq(diff.removed.length, 0, "no removed files");
 
+  console.log("\n=== diffWorktreeAll / numstat / code diff ===");
+  writeFileSync(join(wtPath, "README.md"), "# Test Project\n\nUpdated from worktree\n", "utf-8");
+  run("git add README.md", wtPath);
+  run("git commit -m 'docs: update readme in worktree'", wtPath);
+
+  const repoDiff = diffWorktreeAll(base, "feature-x");
+  assert(repoDiff.modified.some(f => f === "README.md"), "README diff appears in full repo diff");
+
+  const numstat = diffWorktreeNumstat(base, "feature-x");
+  const readmeStat = numstat.find((entry) => entry.file === "README.md");
+  assert(!!readmeStat, "README numstat exists");
+  assert((readmeStat?.added ?? 0) > 0, "README numstat reports added lines");
+
+  const codeDiff = getWorktreeCodeDiff(base, "feature-x");
+  assert(codeDiff.includes("README.md"), "code diff includes README changes");
+  assert(!codeDiff.includes(".gsd/milestones/M002"), "code diff excludes .gsd paths");
+
   console.log("\n=== getWorktreeGSDDiff ===");
   const fullDiff = getWorktreeGSDDiff(base, "feature-x");
   assert(fullDiff.includes("M002"), "full diff mentions M002");
@@ -130,6 +150,12 @@ async function main(): Promise<void> {
   console.log("\n=== getWorktreeLog ===");
   const log = getWorktreeLog(base, "feature-x");
   assert(log.includes("add M002"), "log shows commit message");
+
+  console.log("\n=== clear worktree .gsd only ===");
+  rmSync(join(wtPath, ".gsd"), { recursive: true, force: true });
+  assert(!existsSync(join(wtPath, ".gsd")), "worktree .gsd removed");
+  assert(existsSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md")), "main .gsd untouched");
+  assert(existsSync(join(wtPath, "README.md")), "non-GSD files still present in worktree");
 
   console.log("\n=== removeWorktree ===");
   removeWorktree(base, "feature-x", { deleteBranch: true });

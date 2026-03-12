@@ -14,19 +14,24 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-cod
 import { loadPrompt } from "./prompt-loader.js";
 import { autoCommitCurrentBranch } from "./worktree.js";
 import { showConfirm } from "../shared/confirm-ui.js";
+import { gsdRoot, milestonesDir } from "./paths.js";
 import {
   createWorktree,
   listWorktrees,
   removeWorktree,
+  diffWorktreeAll,
+  diffWorktreeNumstat,
   diffWorktreeGSD,
   getMainBranch,
   getWorktreeGSDDiff,
+  getWorktreeCodeDiff,
   getWorktreeLog,
   worktreeBranchName,
   worktreePath,
 } from "./worktree-manager.js";
-import { existsSync, realpathSync, readFileSync, utimesSync } from "node:fs";
-import { join, resolve } from "node:path";
+import type { FileLineStat } from "./worktree-manager.js";
+import { existsSync, realpathSync, readFileSync, readdirSync, rmSync, unlinkSync, utimesSync } from "node:fs";
+import { join, resolve, sep } from "node:path";
 
 /**
  * Tracks the original project root so we can switch back.
@@ -96,11 +101,52 @@ export function getActiveWorktreeName(): string | null {
   return name || null;
 }
 
+export function activateWorktree(
+  basePath: string,
+  name: string,
+  opts: { createIfMissing?: boolean; failIfExists?: boolean } = {},
+): { path: string; branch: string; commitMsg: string | null } {
+  const { createIfMissing = false, failIfExists = false } = opts;
+  const mainBase = originalCwd ?? basePath;
+  const existing = listWorktrees(mainBase).find((wt) => wt.name === name);
+
+  let path: string;
+  let branch: string;
+
+  if (existing) {
+    if (failIfExists) {
+      throw new Error(`Worktree "${name}" already exists. Use /worktree switch ${name} to reuse it.`);
+    }
+    if (!existing.exists || !existsSync(existing.path)) {
+      throw new Error(`Worktree "${name}" not found. Run /worktree list to see available worktrees.`);
+    }
+    path = existing.path;
+    branch = existing.branch;
+  } else {
+    if (!createIfMissing) {
+      throw new Error(`Worktree "${name}" not found. Run /worktree list to see available worktrees.`);
+    }
+    const createdInfo = createWorktree(mainBase, name);
+    path = createdInfo.path;
+    branch = createdInfo.branch;
+  }
+
+  const commitMsg = autoCommitCurrentBranch(basePath, "worktree-switch", name);
+
+  if (!originalCwd) originalCwd = basePath;
+
+  const prevCwd = process.cwd();
+  process.chdir(path);
+  nudgeGitBranchCache(prevCwd);
+
+  return { path, branch, commitMsg };
+}
+
 // ─── Shared completions and handler (used by both /worktree and /wt) ────────
 
 function worktreeCompletions(prefix: string) {
   const parts = prefix.trim().split(/\s+/);
-  const subcommands = ["list", "merge", "remove", "switch", "return"];
+  const subcommands = ["list", "merge", "remove", "switch", "create", "return"];
 
   if (parts.length <= 1) {
     const partial = parts[0] ?? "";
@@ -119,13 +165,18 @@ function worktreeCompletions(prefix: string) {
     }
   }
 
-  if ((parts[0] === "merge" || parts[0] === "remove" || parts[0] === "switch") && parts.length <= 2) {
+  if ((parts[0] === "merge" || parts[0] === "remove" || parts[0] === "switch" || parts[0] === "create") && parts.length <= 2) {
     const namePrefix = parts[1] ?? "";
     try {
-      const existing = listWorktrees(process.cwd());
-      return existing
+      const mainBase = getWorktreeOriginalCwd() ?? process.cwd();
+      const existing = listWorktrees(mainBase);
+      const completions = existing
         .filter(wt => wt.name.startsWith(namePrefix))
         .map(wt => ({ value: `${parts[0]} ${wt.name}`, label: wt.name }));
+      if (parts[0] === "remove" && "all".startsWith(namePrefix)) {
+        completions.push({ value: "remove all", label: "all" });
+      }
+      return completions;
     } catch {
       return [];
     }
@@ -148,11 +199,12 @@ async function worktreeHandler(
       [
         "Usage:",
         `  /${alias} <name>        — create and switch into a new worktree`,
+        `  /${alias} create <name> — create and switch into a new worktree`,
         `  /${alias} switch <name> — switch into an existing worktree`,
         `  /${alias} return        — switch back to the main project tree`,
         `  /${alias} list          — list all worktrees`,
-        `  /${alias} merge <branch> [target] — merge worktree into target branch`,
-        `  /${alias} remove <name> — remove a worktree and its branch`,
+        `  /${alias} merge [name] [target] — merge worktree into target branch`,
+        `  /${alias} remove <name|all> — remove a worktree (or all) and its branch`,
       ].join("\n"),
       "info",
     );
@@ -169,41 +221,67 @@ async function worktreeHandler(
     return;
   }
 
-  if (trimmed.startsWith("switch ")) {
-    const name = trimmed.replace(/^switch\s+/, "").trim();
+  if (trimmed.startsWith("switch ") || trimmed.startsWith("create ")) {
+    const name = trimmed.replace(/^(?:switch|create)\s+/, "").trim();
     if (!name) {
-      ctx.ui.notify(`Usage: /${alias} switch <name>`, "warning");
+      ctx.ui.notify(`Usage: /${alias} ${trimmed.split(" ")[0]} <name>`, "warning");
       return;
     }
-    await handleSwitch(basePath, name, ctx);
+    const mainBase = originalCwd ?? basePath;
+    const existing = listWorktrees(mainBase);
+    if (existing.some((wt) => wt.name === name)) {
+      await handleSwitch(basePath, name, ctx);
+    } else {
+      await handleCreate(basePath, name, ctx);
+    }
     return;
   }
 
-  if (trimmed.startsWith("merge ")) {
-    const mergeArgs = trimmed.replace(/^merge\s+/, "").trim().split(/\s+/);
-    const name = mergeArgs[0] ?? "";
+  if (trimmed === "merge" || trimmed.startsWith("merge ")) {
+    const mergeArgs = trimmed.replace(/^merge\s*/, "").trim().split(/\s+/).filter(Boolean);
+    const mainBase = originalCwd ?? basePath;
+    const activeWt = getActiveWorktreeName();
+
+    if (mergeArgs.length === 0) {
+      if (!activeWt) {
+        ctx.ui.notify(`Usage: /${alias} merge <name> [target]`, "warning");
+        return;
+      }
+      await handleMerge(mainBase, activeWt, ctx, pi, undefined);
+      return;
+    }
+
+    const name = mergeArgs[0]!;
     const targetBranch = mergeArgs[1];
-    if (!name) {
-      ctx.ui.notify(`Usage: /${alias} merge <branch> [target]`, "warning");
-      return;
+    const worktrees = listWorktrees(mainBase);
+    const isWorktree = worktrees.some((wt) => wt.name === name);
+
+    if (isWorktree) {
+      await handleMerge(mainBase, name, ctx, pi, targetBranch);
+    } else if (activeWt) {
+      await handleMerge(mainBase, activeWt, ctx, pi, name);
+    } else {
+      ctx.ui.notify(`Worktree "${name}" not found. Run /${alias} list to see available worktrees.`, "warning");
     }
-    const mainBase = originalCwd ?? basePath;
-    await handleMerge(mainBase, name, ctx, pi, targetBranch);
     return;
   }
 
-  if (trimmed.startsWith("remove ")) {
-    const name = trimmed.replace(/^remove\s+/, "").trim();
-    if (!name) {
-      ctx.ui.notify(`Usage: /${alias} remove <name>`, "warning");
+  if (trimmed === "remove" || trimmed.startsWith("remove ")) {
+    const name = trimmed.replace(/^remove\s*/, "").trim();
+    const mainBase = originalCwd ?? basePath;
+    if (name === "all") {
+      await handleRemoveAll(mainBase, ctx);
       return;
     }
-    const mainBase = originalCwd ?? basePath;
+    if (!name) {
+      ctx.ui.notify(`Usage: /${alias} remove <name|all>`, "warning");
+      return;
+    }
     await handleRemove(mainBase, name, ctx);
     return;
   }
 
-  const RESERVED = ["list", "return", "switch", "merge", "remove"];
+  const RESERVED = ["list", "return", "switch", "create", "merge", "remove"];
   if (RESERVED.includes(trimmed)) {
     ctx.ui.notify(`Usage: /${alias} ${trimmed}${trimmed === "list" || trimmed === "return" ? "" : " <name>"}`, "warning");
     return;
@@ -225,8 +303,17 @@ async function worktreeHandler(
 }
 
 export function registerWorktreeCommand(pi: ExtensionAPI): void {
+  if (!originalCwd) {
+    const cwd = process.cwd();
+    const marker = `${sep}.gsd${sep}worktrees${sep}`;
+    const markerIdx = cwd.indexOf(marker);
+    if (markerIdx !== -1) {
+      originalCwd = cwd.slice(0, markerIdx);
+    }
+  }
+
   pi.registerCommand("worktree", {
-    description: "Git worktrees: /worktree <name> | list | merge <branch> [target] | remove <name>",
+    description: "Git worktrees: /worktree <name> | list | merge | remove",
     getArgumentCompletions: worktreeCompletions,
 
     async handler(args: string, ctx: ExtensionCommandContext) {
@@ -236,7 +323,7 @@ export function registerWorktreeCommand(pi: ExtensionAPI): void {
 
   // /wt alias — same handler, same completions
   pi.registerCommand("wt", {
-    description: "Alias for /worktree — Git worktrees: /wt <name> | list | merge | remove",
+    description: "Alias for /worktree",
     getArgumentCompletions: worktreeCompletions,
     async handler(args: string, ctx: ExtensionCommandContext) {
       await worktreeHandler(args, ctx, pi, "wt");
@@ -246,33 +333,68 @@ export function registerWorktreeCommand(pi: ExtensionAPI): void {
 
 // ─── Handlers ──────────────────────────────────────────────────────────────
 
+function hasExistingMilestones(wtPath: string): boolean {
+  const mDir = milestonesDir(wtPath);
+  if (!existsSync(mDir)) return false;
+  try {
+    return readdirSync(mDir, { withFileTypes: true })
+      .some((entry) => entry.isDirectory() && /^M\d+/.test(entry.name));
+  } catch {
+    return false;
+  }
+}
+
+function clearGSDPlans(wtPath: string): void {
+  const mDir = milestonesDir(wtPath);
+  if (existsSync(mDir)) {
+    rmSync(mDir, { recursive: true, force: true });
+  }
+
+  const root = gsdRoot(wtPath);
+  for (const file of ["PROJECT.md", "DECISIONS.md", "QUEUE.md", "REQUIREMENTS.md"]) {
+    const filePath = join(root, file);
+    if (existsSync(filePath)) {
+      unlinkSync(filePath);
+    }
+  }
+}
+
 async function handleCreate(
   basePath: string,
   name: string,
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   try {
-    // Create from the main tree, not from inside another worktree
-    const mainBase = originalCwd ?? basePath;
-    const info = createWorktree(mainBase, name);
+    const info = activateWorktree(basePath, name, { createIfMissing: true, failIfExists: true });
 
-    // Auto-commit dirty files before leaving current workspace
-    const commitMsg = autoCommitCurrentBranch(basePath, "worktree-switch", name);
+    let clearedPlans = false;
+    if (hasExistingMilestones(info.path)) {
+      const keepExisting = await showConfirm(ctx, {
+        title: "Worktree Setup",
+        message: [
+          `This worktree inherited existing GSD milestones from the main branch.`,
+          ``,
+          `  Continue — keep milestones and pick up where main left off`,
+          `  Start fresh — clear milestones so /gsd auto starts a new project`,
+        ].join("\n"),
+        confirmLabel: "Continue",
+        declineLabel: "Start fresh",
+      });
+      if (!keepExisting) {
+        clearGSDPlans(info.path);
+        clearedPlans = true;
+      }
+    }
 
-    // Track original cwd before switching
-    if (!originalCwd) originalCwd = basePath;
-
-    const prevCwd = process.cwd();
-    process.chdir(info.path);
-    nudgeGitBranchCache(prevCwd);
-
-    const commitNote = commitMsg ? `\n  Auto-committed on previous branch before switching.` : "";
+    const commitNote = info.commitMsg ? `\n  Auto-committed on previous branch before switching.` : "";
+    const freshNote = clearedPlans ? `\n  Cleared milestones so /gsd auto starts fresh in this worktree.` : "";
     ctx.ui.notify(
       [
         `Worktree "${name}" created and activated.`,
         `  Path:   ${info.path}`,
         `  Branch: ${info.branch}`,
         commitNote,
+        freshNote,
         `Session is now in the worktree. All commands run here.`,
         `Use /worktree merge ${name} to merge back when done.`,
         `Use /worktree return to switch back to the main tree.`,
@@ -291,33 +413,14 @@ async function handleSwitch(
   ctx: ExtensionCommandContext,
 ): Promise<void> {
   try {
-    const mainBase = originalCwd ?? basePath;
-    const wtPath = worktreePath(mainBase, name);
+    const info = activateWorktree(basePath, name);
 
-    if (!existsSync(wtPath)) {
-      ctx.ui.notify(
-        `Worktree "${name}" not found. Run /worktree list to see available worktrees.`,
-        "warning",
-      );
-      return;
-    }
-
-    // Auto-commit dirty files before leaving current workspace
-    const commitMsg = autoCommitCurrentBranch(basePath, "worktree-switch", name);
-
-    // Track original cwd before switching
-    if (!originalCwd) originalCwd = basePath;
-
-    const prevCwd = process.cwd();
-    process.chdir(wtPath);
-    nudgeGitBranchCache(prevCwd);
-
-    const commitNote = commitMsg ? `\n  Auto-committed on previous branch before switching.` : "";
+    const commitNote = info.commitMsg ? `\n  Auto-committed on previous branch before switching.` : "";
     ctx.ui.notify(
       [
         `Switched to worktree "${name}".`,
-        `  Path:   ${wtPath}`,
-        `  Branch: ${worktreeBranchName(name)}`,
+        `  Path:   ${info.path}`,
+        `  Branch: ${info.branch}`,
         commitNote,
         `Use /worktree return to switch back to the main tree.`,
       ].filter(Boolean).join("\n"),
@@ -423,9 +526,10 @@ async function handleMerge(
       return;
     }
 
-    // Gather merge context
-    const diffSummary = diffWorktreeGSD(basePath, name);
-    const fullDiff = getWorktreeGSDDiff(basePath, name);
+    const diffSummary = diffWorktreeAll(basePath, name);
+    const numstat = diffWorktreeNumstat(basePath, name);
+    const gsdDiff = getWorktreeGSDDiff(basePath, name);
+    const codeDiff = getWorktreeCodeDiff(basePath, name);
     const commitLog = getWorktreeLog(basePath, name);
 
     const totalChanges = diffSummary.added.length + diffSummary.modified.length + diffSummary.removed.length;
@@ -434,27 +538,46 @@ async function handleMerge(
       return;
     }
 
-    // Preview confirmation before merge dispatch
+    const statMap = new Map<string, FileLineStat>();
+    for (const stat of numstat) statMap.set(stat.file, stat);
+
+    let totalAdded = 0;
+    let totalRemoved = 0;
+    for (const stat of numstat) {
+      totalAdded += stat.added;
+      totalRemoved += stat.removed;
+    }
+
+    const isGsd = (file: string) => file.startsWith(".gsd/");
+    const codeChanges = diffSummary.added.filter((f) => !isGsd(f)).length
+      + diffSummary.modified.filter((f) => !isGsd(f)).length
+      + diffSummary.removed.filter((f) => !isGsd(f)).length;
+    const gsdChanges = diffSummary.added.filter(isGsd).length
+      + diffSummary.modified.filter(isGsd).length
+      + diffSummary.removed.filter(isGsd).length;
+
+    const formatFileLine = (prefix: string, file: string): string => {
+      const stat = statMap.get(file);
+      const detail = stat ? ` +${stat.added} -${stat.removed}` : "";
+      return `    ${prefix} ${file}${detail}`;
+    };
+
     const previewLines = [
       `Merge worktree "${name}" → ${mainBranch}`,
       "",
-      `  ${diffSummary.added.length} added · ${diffSummary.modified.length} modified · ${diffSummary.removed.length} removed`,
+      `  ${totalChanges} file${totalChanges === 1 ? "" : "s"} changed, +${totalAdded} -${totalRemoved} lines (${codeChanges} code, ${gsdChanges} GSD)`,
     ];
-    if (diffSummary.added.length > 0) {
-      previewLines.push("", "  Added:");
-      for (const f of diffSummary.added.slice(0, 10)) previewLines.push(`    + ${f}`);
-      if (diffSummary.added.length > 10) previewLines.push(`    … and ${diffSummary.added.length - 10} more`);
-    }
-    if (diffSummary.modified.length > 0) {
-      previewLines.push("", "  Modified:");
-      for (const f of diffSummary.modified.slice(0, 10)) previewLines.push(`    ~ ${f}`);
-      if (diffSummary.modified.length > 10) previewLines.push(`    … and ${diffSummary.modified.length - 10} more`);
-    }
-    if (diffSummary.removed.length > 0) {
-      previewLines.push("", "  Removed:");
-      for (const f of diffSummary.removed.slice(0, 10)) previewLines.push(`    - ${f}`);
-      if (diffSummary.removed.length > 10) previewLines.push(`    … and ${diffSummary.removed.length - 10} more`);
-    }
+
+    const appendFiles = (label: string, files: string[], prefix: string, limit = 10) => {
+      if (files.length === 0) return;
+      previewLines.push("", `  ${label}:`);
+      for (const file of files.slice(0, limit)) previewLines.push(formatFileLine(prefix, file));
+      if (files.length > limit) previewLines.push(`    … and ${files.length - limit} more`);
+    };
+
+    appendFiles("Added", diffSummary.added, "+");
+    appendFiles("Modified", diffSummary.modified, "~");
+    appendFiles("Removed", diffSummary.removed, "-");
 
     const confirmed = await showConfirm(ctx, {
       title: "Worktree Merge",
@@ -467,20 +590,29 @@ async function handleMerge(
       return;
     }
 
-    // Format file lists for the prompt
+    if (originalCwd) {
+      const prevCwd = process.cwd();
+      process.chdir(basePath);
+      nudgeGitBranchCache(prevCwd);
+      originalCwd = null;
+    }
+
     const formatFiles = (files: string[]) =>
       files.length > 0 ? files.map(f => `- \`${f}\``).join("\n") : "_(none)_";
 
-    // Load and populate the merge prompt
+    const wtPath = worktreePath(basePath, name);
     const prompt = loadPrompt("worktree-merge", {
       worktreeName: name,
       worktreeBranch: branch,
       mainBranch,
+      mainTreePath: basePath,
+      worktreePath: wtPath,
       commitLog: commitLog || "(no commits)",
       addedFiles: formatFiles(diffSummary.added),
       modifiedFiles: formatFiles(diffSummary.modified),
       removedFiles: formatFiles(diffSummary.removed),
-      fullDiff: fullDiff || "(no diff)",
+      gsdDiff: gsdDiff || "(no GSD artifact changes)",
+      codeDiff: codeDiff || "(no code changes)",
     });
 
     // Dispatch to the LLM
@@ -494,7 +626,7 @@ async function handleMerge(
     );
 
     ctx.ui.notify(
-      `Merge helper started for worktree "${name}" (${totalChanges} GSD artifact change${totalChanges === 1 ? "" : "s"}).`,
+      `Merge helper started for worktree "${name}" (${codeChanges} code + ${gsdChanges} GSD change${totalChanges === 1 ? "" : "s"}).`,
       "info",
     );
   } catch (error) {
@@ -510,6 +642,24 @@ async function handleRemove(
 ): Promise<void> {
   try {
     const mainBase = originalCwd ?? basePath;
+    const worktrees = listWorktrees(mainBase);
+    const wt = worktrees.find((entry) => entry.name === name);
+    if (!wt) {
+      ctx.ui.notify(`Worktree "${name}" not found. Run /worktree list to see available worktrees.`, "warning");
+      return;
+    }
+
+    const confirmed = await showConfirm(ctx, {
+      title: "Remove Worktree",
+      message: `Remove worktree "${name}" and delete branch ${wt.branch}?`,
+      confirmLabel: "Remove",
+      declineLabel: "Cancel",
+    });
+    if (!confirmed) {
+      ctx.ui.notify("Cancelled.", "info");
+      return;
+    }
+
     const prevCwd = process.cwd();
     removeWorktree(mainBase, name, { deleteBranch: true });
 
@@ -523,5 +673,56 @@ async function handleRemove(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     ctx.ui.notify(`Failed to remove worktree: ${msg}`, "error");
+  }
+}
+
+async function handleRemoveAll(
+  basePath: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  try {
+    const mainBase = originalCwd ?? basePath;
+    const worktrees = listWorktrees(mainBase);
+    if (worktrees.length === 0) {
+      ctx.ui.notify("No worktrees to remove.", "info");
+      return;
+    }
+
+    const confirmed = await showConfirm(ctx, {
+      title: "Remove All Worktrees",
+      message: `Remove ${worktrees.length} worktree${worktrees.length === 1 ? "" : "s"} and delete their branches?\n\n${worktrees.map((wt) => `  • ${wt.name}`).join("\n")}`,
+      confirmLabel: "Remove all",
+      declineLabel: "Cancel",
+    });
+    if (!confirmed) {
+      ctx.ui.notify("Cancelled.", "info");
+      return;
+    }
+
+    const prevCwd = process.cwd();
+    const removed: string[] = [];
+    const failed: string[] = [];
+
+    for (const wt of worktrees) {
+      try {
+        removeWorktree(mainBase, wt.name, { deleteBranch: true });
+        removed.push(wt.name);
+      } catch {
+        failed.push(wt.name);
+      }
+    }
+
+    if (originalCwd && process.cwd() !== prevCwd) {
+      nudgeGitBranchCache(prevCwd);
+      originalCwd = null;
+    }
+
+    const lines: string[] = [];
+    if (removed.length > 0) lines.push(`Removed: ${removed.join(", ")}`);
+    if (failed.length > 0) lines.push(`Failed: ${failed.join(", ")}`);
+    ctx.ui.notify(lines.join("\n"), failed.length > 0 ? "warning" : "info");
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Failed to remove worktrees: ${msg}`, "error");
   }
 }

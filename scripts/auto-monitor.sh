@@ -14,7 +14,7 @@ Defaults:
 
 What it does:
   - starts GSD auto mode headless in the background
-  - writes a pid file at .gsd/headless-auto.pid
+  - writes runner metadata under ~/.gsd/runtime/
   - logs execution to .gsd/auto-run.log
   - lets you inspect or tail the same run later
 EOF
@@ -48,14 +48,124 @@ project_path="$(cd "${1}" && pwd)"
 project_name="$(basename "${project_path}")"
 gsd_root="$(cd "$(dirname "${0}")/.." && pwd)"
 log_file="${project_path}/.gsd/auto-run.log"
-pid_file="${project_path}/.gsd/headless-auto.pid"
-stdout_file="${project_path}/.gsd/headless-auto.stdout.log"
+safe_project_key="$(echo "${project_path}" | tr '/:' '__' | tr -cs '[:alnum:]_-' '_')"
+runtime_dir="${HOME}/.gsd/runtime/${safe_project_key}"
+pid_file="${runtime_dir}/headless-auto.pid"
+stdout_file="${runtime_dir}/headless-auto.stdout.log"
+label_file="${runtime_dir}/launchctl.label"
 state_file="${project_path}/.gsd/STATE.md"
 lock_file="${project_path}/.gsd/auto.lock"
 derived_state_script="${gsd_root}/scripts/derived-state-summary.mjs"
 derived_state_resolver="${gsd_root}/src/resources/extensions/gsd/tests/resolve-ts.mjs"
+runner_script="${gsd_root}/scripts/headless-auto.mjs"
+launchctl_label="com.gsd.auto.${safe_project_key}"
+launch_agents_dir="${HOME}/Library/LaunchAgents"
+launchctl_plist="${launch_agents_dir}/${launchctl_label}.plist"
 
 mkdir -p "${project_path}/.gsd"
+mkdir -p "${runtime_dir}"
+
+supports_launchctl() {
+  [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1
+}
+
+shell_quote() {
+  printf '%q' "$1"
+}
+
+build_launch_env_prefix() {
+  local vars=(
+    HOME USER LOGNAME SHELL PATH TMPDIR SSH_AUTH_SOCK
+    LANG LC_ALL TERM COLORTERM CODEX_HOME NODE_PATH
+    GSD_CODING_AGENT_DIR PI_PACKAGE_DIR PI_SKIP_VERSION_CHECK
+  )
+  local parts=()
+  local name value
+  for name in "${vars[@]}"; do
+    value="${!name-}"
+    if [[ -n "${value}" ]]; then
+      parts+=("${name}=$(shell_quote "${value}")")
+    fi
+  done
+  printf '%s ' "${parts[@]}"
+}
+
+xml_escape() {
+  local value="${1}"
+  value="${value//&/&amp;}"
+  value="${value//</&lt;}"
+  value="${value//>/&gt;}"
+  printf '%s' "${value}"
+}
+
+write_launchctl_plist() {
+  mkdir -p "${launch_agents_dir}"
+  local command
+  command="cd $(shell_quote "${gsd_root}") && exec node $(shell_quote "${runner_script}") $(shell_quote "${project_path}") $(shell_quote "${log_file}")"
+  cat > "${launchctl_plist}" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(xml_escape "${launchctl_label}")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>$(xml_escape "${command}")</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>WorkingDirectory</key>
+  <string>$(xml_escape "${gsd_root}")</string>
+  <key>StandardOutPath</key>
+  <string>$(xml_escape "${stdout_file}")</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml_escape "${stdout_file}")</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+EOF
+
+  local vars=(
+    HOME USER LOGNAME SHELL PATH TMPDIR SSH_AUTH_SOCK
+    LANG LC_ALL TERM COLORTERM CODEX_HOME NODE_PATH
+    GSD_CODING_AGENT_DIR PI_PACKAGE_DIR PI_SKIP_VERSION_CHECK
+  )
+  local name value
+  for name in "${vars[@]}"; do
+    value="${!name-}"
+    if [[ -n "${value}" ]]; then
+      cat >> "${launchctl_plist}" <<EOF
+    <key>$(xml_escape "${name}")</key>
+    <string>$(xml_escape "${value}")</string>
+EOF
+    fi
+  done
+
+  cat >> "${launchctl_plist}" <<EOF
+  </dict>
+</dict>
+</plist>
+EOF
+}
+
+write_launchctl_label() {
+  echo "${launchctl_label}" > "${label_file}"
+}
+
+read_launchctl_label() {
+  if [[ -f "${label_file}" ]]; then
+    tr -d '[:space:]' < "${label_file}"
+  fi
+}
+
+is_launchctl_running() {
+  local label="${1:-}"
+  [[ -n "${label}" ]] && launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1
+}
 
 is_pid_running() {
   local pid="$1"
@@ -97,12 +207,17 @@ print_state_summary() {
   echo "path: ${project_path}"
   echo "log: ${log_file}"
   echo "pid-file: ${pid_file}"
+  echo "launchctl-label-file: ${label_file}"
 
   local pid
   pid="$(read_pid || true)"
   local lock_pid
   lock_pid="$(read_lock_pid || true)"
-  if [[ -n "${pid}" ]] && is_pid_running "${pid}"; then
+  local label
+  label="$(read_launchctl_label || true)"
+  if [[ -n "${label}" ]] && is_launchctl_running "${label}"; then
+    echo "runner: running via launchctl (${label})"
+  elif [[ -n "${pid}" ]] && is_pid_running "${pid}"; then
     echo "runner: running (pid ${pid})"
   elif [[ -n "${lock_pid}" ]] && is_pid_running "${lock_pid}"; then
     echo "runner: running via lock pid ${lock_pid}"
@@ -133,6 +248,35 @@ print_state_summary() {
 }
 
 start_runner() {
+  local label
+  label="$(read_launchctl_label || true)"
+  if supports_launchctl; then
+    if [[ -z "${label}" ]]; then
+      write_launchctl_label
+      label="${launchctl_label}"
+    fi
+
+    if is_launchctl_running "${label}"; then
+      echo "auto runner already running for ${project_name} via launchctl (${label})"
+      return 0
+    fi
+
+    write_launchctl_plist
+    launchctl bootout "gui/$(id -u)" "${launchctl_plist}" >/dev/null 2>&1 || true
+    launchctl remove "${label}" >/dev/null 2>&1 || true
+    : > "${stdout_file}"
+    launchctl bootstrap "gui/$(id -u)" "${launchctl_plist}"
+    sleep 1
+
+    if ! is_launchctl_running "${label}"; then
+      echo "failed to start auto runner for ${project_name} via launchctl/LaunchAgent" >&2
+      exit 1
+    fi
+
+    echo "started auto runner for ${project_name} via LaunchAgent (${label})"
+    return 0
+  fi
+
   local pid
   pid="$(read_pid || true)"
   if [[ -n "${pid}" ]] && is_pid_running "${pid}"; then
@@ -148,7 +292,7 @@ start_runner() {
     return 0
   fi
 
-  nohup node "${gsd_root}/scripts/headless-auto.mjs" "${project_path}" "${log_file}" >> "${stdout_file}" 2>&1 &
+  nohup node "${runner_script}" "${project_path}" "${log_file}" >> "${stdout_file}" 2>&1 &
   pid="$!"
   echo "${pid}" > "${pid_file}"
   sleep 1
@@ -183,6 +327,20 @@ case "${subcommand}" in
     tail_logs
     ;;
   stop)
+    label="$(read_launchctl_label || true)"
+    if [[ -n "${label}" ]] && { is_launchctl_running "${label}" || [[ -f "${launchctl_plist}" ]]; }; then
+      launchctl bootout "gui/$(id -u)" "${launchctl_plist}" >/dev/null 2>&1 || launchctl remove "${label}" >/dev/null 2>&1 || true
+      rm -f "${launchctl_plist}"
+      rm -f "${pid_file}"
+      sleep 1
+      lock_pid="$(read_lock_pid || true)"
+      if [[ -z "${lock_pid}" ]] || ! is_pid_running "${lock_pid}"; then
+        clear_lock_file
+      fi
+      echo "stopped auto runner for ${project_name} via LaunchAgent (${label})"
+      exit 0
+    fi
+
     pid="$(read_pid || true)"
     lock_pid="$(read_lock_pid || true)"
     if [[ -z "${pid}" ]]; then

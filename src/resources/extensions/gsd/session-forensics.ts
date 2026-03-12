@@ -86,6 +86,18 @@ function extractLastSession(entries: unknown[]): unknown[] {
   return lastSessionIdx >= 0 ? entries.slice(lastSessionIdx) : entries;
 }
 
+function extractLastAutoUnit(entries: unknown[]): unknown[] {
+  let lastAutoIdx = -1;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i] as Record<string, unknown>;
+    if (entry.type === "custom_message" && entry.customType === "gsd-auto") {
+      lastAutoIdx = i;
+      break;
+    }
+  }
+  return lastAutoIdx >= 0 ? entries.slice(lastAutoIdx) : entries;
+}
+
 // ─── Trace Extraction ─────────────────────────────────────────────────────────
 
 /**
@@ -440,7 +452,8 @@ function readLastActivityLog(activityDir?: string): ExecutionTrace | null {
 
     const lastFile = files[files.length - 1]!;
     const raw = readFileSync(join(activityDir, lastFile), "utf-8");
-    return extractTrace(parseJSONL(raw));
+    const entries = parseJSONL(raw);
+    return extractTrace(extractLastAutoUnit(entries));
   } catch {
     return null;
   }

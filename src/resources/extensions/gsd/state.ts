@@ -31,7 +31,7 @@ import {
 } from './paths.ts';
 import { getActiveSliceBranch } from './worktree.ts';
 
-import { readdirSync } from 'fs';
+import { readdirSync, statSync } from 'fs';
 import { join } from 'path';
 
 // ─── Query Functions ───────────────────────────────────────────────────────
@@ -68,6 +68,15 @@ function findMilestoneIds(basePath: string): string[] {
       .sort();
   } catch {
     return [];
+  }
+}
+
+function getFileMtimeMs(path: string | null): number | null {
+  if (!path) return null;
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
   }
 }
 
@@ -359,7 +368,57 @@ export async function deriveState(basePath: string): Promise<GSDState> {
     done: slicePlan.tasks.filter(t => t.done).length,
     total: slicePlan.tasks.length,
   };
+  const completedTasks = slicePlan.tasks.filter(t => t.done);
+  let blockerTaskId: string | null = null;
+  let blockerTaskUpdatedAt: number | null = null;
+  for (const ct of completedTasks) {
+    const summaryFile = resolveTaskFile(basePath, activeMilestone.id, activeSlice.id, ct.id, "SUMMARY");
+    if (!summaryFile) continue;
+    const summaryContent = await loadFile(summaryFile);
+    if (!summaryContent) continue;
+    const summary = parseSummary(summaryContent);
+    if (summary.frontmatter.blocker_discovered) {
+      const summaryUpdatedAt = getFileMtimeMs(summaryFile);
+      if (blockerTaskUpdatedAt === null || (summaryUpdatedAt ?? 0) >= blockerTaskUpdatedAt) {
+        blockerTaskId = ct.id;
+        blockerTaskUpdatedAt = summaryUpdatedAt ?? 0;
+      }
+    }
+  }
+  const replanFile = resolveSliceFile(basePath, activeMilestone.id, activeSlice.id, "REPLAN");
+  const replanUpdatedAt = getFileMtimeMs(replanFile);
   const activeTaskEntry = slicePlan.tasks.find(t => !t.done);
+
+  const needsFreshReplan = blockerTaskId !== null && (
+    replanUpdatedAt === null ||
+    (blockerTaskUpdatedAt ?? 0) > replanUpdatedAt
+  );
+
+  if (needsFreshReplan) {
+    return {
+      activeMilestone,
+      activeSlice,
+      activeTask: activeTaskEntry
+        ? {
+            id: activeTaskEntry.id,
+            title: activeTaskEntry.title,
+          }
+        : null,
+      phase: 'replanning-slice',
+      recentDecisions: [],
+      blockers: [`Task ${blockerTaskId} discovered a blocker requiring slice replan`],
+      nextAction: `Task ${blockerTaskId} reported blocker_discovered. Replan slice ${activeSlice.id} before continuing.`,
+      activeBranch: activeBranch ?? undefined,
+      activeWorkspace: undefined,
+      registry,
+      requirements,
+      progress: {
+        milestones: milestoneProgress,
+        slices: sliceProgress,
+        tasks: taskProgress,
+      },
+    };
+  }
 
   if (!activeTaskEntry) {
     // All tasks done but slice not marked complete
@@ -387,47 +446,7 @@ export async function deriveState(basePath: string): Promise<GSDState> {
     title: activeTaskEntry.title,
   };
 
-  // ── Blocker detection: scan completed task summaries ──────────────────
-  // If any completed task has blocker_discovered: true and no REPLAN.md
-  // exists yet, transition to replanning-slice instead of executing.
-  const completedTasks = slicePlan.tasks.filter(t => t.done);
-  let blockerTaskId: string | null = null;
-  for (const ct of completedTasks) {
-    const summaryFile = resolveTaskFile(basePath, activeMilestone.id, activeSlice.id, ct.id, "SUMMARY");
-    if (!summaryFile) continue;
-    const summaryContent = await loadFile(summaryFile);
-    if (!summaryContent) continue;
-    const summary = parseSummary(summaryContent);
-    if (summary.frontmatter.blocker_discovered) {
-      blockerTaskId = ct.id;
-      break;
-    }
-  }
-
   if (blockerTaskId) {
-    // Loop protection: if REPLAN.md already exists, a replan was already
-    // performed for this slice — skip further replanning and continue executing.
-    const replanFile = resolveSliceFile(basePath, activeMilestone.id, activeSlice.id, "REPLAN");
-    if (!replanFile) {
-      return {
-        activeMilestone,
-        activeSlice,
-        activeTask,
-        phase: 'replanning-slice',
-        recentDecisions: [],
-        blockers: [`Task ${blockerTaskId} discovered a blocker requiring slice replan`],
-        nextAction: `Task ${blockerTaskId} reported blocker_discovered. Replan slice ${activeSlice.id} before continuing.`,
-        activeBranch: activeBranch ?? undefined,
-        activeWorkspace: undefined,
-        registry,
-        requirements,
-        progress: {
-          milestones: milestoneProgress,
-          slices: sliceProgress,
-          tasks: taskProgress,
-        },
-      };
-    }
     // REPLAN.md exists — loop protection: fall through to normal executing
   }
 

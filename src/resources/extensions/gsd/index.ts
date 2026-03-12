@@ -22,7 +22,12 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@mariozechner/pi-coding-agent";
-import { createBashTool } from "@mariozechner/pi-coding-agent";
+import {
+  createBashTool,
+  createEditTool,
+  createReadTool,
+  createWriteTool,
+} from "@mariozechner/pi-coding-agent";
 
 import { registerGSDCommand } from "./commands.js";
 import { registerWorktreeCommand, getWorktreeOriginalCwd, getActiveWorktreeName } from "./worktree-command.js";
@@ -49,6 +54,7 @@ import { Key } from "@mariozechner/pi-tui";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { Text } from "@mariozechner/pi-tui";
+import { shortcutDesc } from "../shared/terminal.js";
 
 // ── ASCII logo ────────────────────────────────────────────────────────────
 const GSD_LOGO_LINES = [
@@ -63,6 +69,13 @@ const GSD_LOGO_LINES = [
 export default function (pi: ExtensionAPI) {
   registerGSDCommand(pi);
   registerWorktreeCommand(pi);
+
+  pi.registerCommand("exit", {
+    description: "Exit GSD immediately",
+    handler: async () => {
+      process.exit(0);
+    },
+  });
 
   // ── Dynamic-cwd bash tool with default timeout ────────────────────────
   // The built-in bash tool captures cwd at startup. This replacement uses
@@ -95,21 +108,81 @@ export default function (pi: ExtensionAPI) {
   };
   pi.registerTool(dynamicBash as any);
 
+  // The built-in file tools also capture cwd at startup. Recreate them on
+  // each execution so /worktree switch resolves relative paths correctly.
+  const baseWrite = createWriteTool(process.cwd());
+  const dynamicWrite = {
+    ...baseWrite,
+    execute: async (
+      toolCallId: string,
+      params: { path: string; content: string },
+      signal?: AbortSignal,
+      onUpdate?: any,
+      ctx?: any,
+    ) => createWriteTool(process.cwd()).execute(toolCallId, params, signal, onUpdate, ctx),
+  };
+  pi.registerTool(dynamicWrite as any);
+
+  const baseRead = createReadTool(process.cwd());
+  const dynamicRead = {
+    ...baseRead,
+    execute: async (
+      toolCallId: string,
+      params: { path: string; offset?: number; limit?: number },
+      signal?: AbortSignal,
+      onUpdate?: any,
+      ctx?: any,
+    ) => createReadTool(process.cwd()).execute(toolCallId, params, signal, onUpdate, ctx),
+  };
+  pi.registerTool(dynamicRead as any);
+
+  const baseEdit = createEditTool(process.cwd());
+  const dynamicEdit = {
+    ...baseEdit,
+    execute: async (
+      toolCallId: string,
+      params: { path: string; oldText: string; newText: string },
+      signal?: AbortSignal,
+      onUpdate?: any,
+      ctx?: any,
+    ) => createEditTool(process.cwd()).execute(toolCallId, params, signal, onUpdate, ctx),
+  };
+  pi.registerTool(dynamicEdit as any);
+
   // ── session_start: render branded GSD header ───────────────────────────
   pi.on("session_start", async (_event, ctx) => {
-    const theme = ctx.ui.theme;
-    const version = process.env.GSD_VERSION || "0.0.0";
+    try {
+      const theme = ctx.ui.theme;
+      const version = process.env.GSD_VERSION || "0.0.0";
 
-    const logoText = GSD_LOGO_LINES.map((line) => theme.fg("accent", line)).join("\n");
-    const titleLine = `  ${theme.bold("Get Shit Done")} ${theme.fg("dim", `v${version}`)}`;
+      const logoText = GSD_LOGO_LINES.map((line) => theme.fg("accent", line)).join("\n");
+      const titleLine = `  ${theme.bold("Get Shit Done")} ${theme.fg("dim", `v${version}`)}`;
 
-    const headerContent = `${logoText}\n${titleLine}`;
-    ctx.ui.setHeader((_ui, _theme) => new Text(headerContent, 1, 0));
+      const headerContent = `${logoText}\n${titleLine}`;
+      ctx.ui.setHeader((_ui, _theme) => new Text(headerContent, 1, 0));
+    } catch {
+      // RPC/print modes may not expose a TUI theme.
+    }
+
+    try {
+      const [{ getRemoteConfigStatus }, { getLatestPromptSummary }] = await Promise.all([
+        import("../remote-questions/config.js"),
+        import("../remote-questions/status.js"),
+      ]);
+      const status = getRemoteConfigStatus();
+      const latest = getLatestPromptSummary();
+      if (!status.includes("not configured")) {
+        const suffix = latest ? `\nLast remote prompt: ${latest.id} (${latest.status})` : "";
+        ctx.ui.notify(`${status}${suffix}`, status.includes("disabled") ? "warning" : "info");
+      }
+    } catch {
+      // Remote questions not available — ignore.
+    }
   });
 
   // ── Ctrl+Alt+G shortcut — GSD dashboard overlay ────────────────────────
   pi.registerShortcut(Key.ctrlAlt("g"), {
-    description: "Open GSD dashboard",
+    description: shortcutDesc("Open GSD dashboard", "/gsd status"),
     handler: async (ctx) => {
       // Only show if .gsd/ exists
       if (!existsSync(join(process.cwd(), ".gsd"))) {

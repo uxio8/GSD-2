@@ -4,7 +4,7 @@ import {
   SessionManager,
   createAgentSession,
 } from "../node_modules/@mariozechner/pi-coding-agent/dist/index.js";
-import { appendFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentDir, sessionsDir, authFilePath } from "../dist/app-paths.js";
@@ -21,6 +21,9 @@ const autoLock = join(cwd, ".gsd", "auto.lock");
 const stateFile = join(cwd, ".gsd", "STATE.md");
 const idleChecksBeforeRelaunch = 3;
 const maxConsecutiveRelaunches = 3;
+const maxContextLimitRelaunchesPerUnit = 2;
+const staleStreamingMs = 2 * 60 * 1000;
+const maxStaleStreamingResetsPerUnit = 2;
 
 function log(message) {
   mkdirSync(dirname(logFile), { recursive: true });
@@ -39,10 +42,27 @@ function readStateSnapshot() {
   }
 }
 
+function readLockSnapshot() {
+  if (!existsSync(autoLock)) return null;
+
+  try {
+    return JSON.parse(readFileSync(autoLock, "utf8"));
+  } catch (error) {
+    log(`lock-read-error ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+}
+
+function isContextLengthError(message) {
+  return /context_length_exceeded|context window/i.test(message);
+}
+
 async function promptAuto(session, reason) {
+  markActivity();
   log(`auto-command start reason=${reason}`);
   try {
     await session.prompt("/gsd auto");
+    markActivity();
     log(`auto-command complete reason=${reason}`);
     return true;
   } catch (error) {
@@ -141,6 +161,25 @@ function extractText(content) {
     .join("");
 }
 
+function maybeRotateOnUsageLimit(errorMessage) {
+  if (!cloudPoolSession.poolActive) return;
+  if (!errorMessage) return;
+  if (usageLimitRotation) return;
+
+  usageLimitRotation = (async () => {
+    try {
+      const rotated = await cloudPoolSession.rotateOnUsageLimit(errorMessage);
+      if (!rotated) return;
+      pendingRelaunchReason = "usage-limit-rotate";
+      log("usage-limit-rotated");
+    } catch (error) {
+      log(`usage-limit-rotation-failed ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      usageLimitRotation = null;
+    }
+  })();
+}
+
 await ensureRuntimeEnv();
 setVersionEnv();
 setWorkflowEnv();
@@ -162,20 +201,24 @@ initResources(agentDir);
 const resourceLoader = buildResourceLoader(agentDir);
 await resourceLoader.reload();
 
-const { session, extensionsResult } = await createAgentSession({
-  authStorage,
-  modelRegistry,
-  settingsManager,
-  sessionManager,
-  resourceLoader,
-});
+let pendingRelaunchReason = null;
+let usageLimitRotation = null;
+const enabledModelPatterns = settingsManager.getEnabledModels();
+let contextLimitUnitId = null;
+let contextLimitRelaunches = 0;
+let pendingSessionResetReason = null;
+let session = null;
+let lastActivityAt = Date.now();
+let staleStreamUnitId = null;
+let staleStreamResets = 0;
 
-for (const err of extensionsResult.errors) {
-  log(`extension-error ${err.path}: ${err.error}`);
+function markActivity() {
+  lastActivityAt = Date.now();
 }
 
-const enabledModelPatterns = settingsManager.getEnabledModels();
-if (enabledModelPatterns && enabledModelPatterns.length > 0) {
+function applyScopedModels(nextSession) {
+  if (!enabledModelPatterns || enabledModelPatterns.length === 0) return;
+
   const availableModels = modelRegistry.getAvailable();
   const scopedModels = [];
   const seen = new Set();
@@ -206,41 +249,156 @@ if (enabledModelPatterns && enabledModelPatterns.length > 0) {
   }
 
   if (scopedModels.length > 0 && scopedModels.length < availableModels.length) {
-    session.setScopedModels(scopedModels);
+    nextSession.setScopedModels(scopedModels);
   }
 }
 
-session.subscribe((event) => {
+function maybeScheduleContextReset(errorMessage) {
+  if (!isContextLengthError(errorMessage)) return;
+
+  const lock = readLockSnapshot();
+  const unitId = lock?.unitId ?? "unknown";
+  if (contextLimitUnitId === unitId) {
+    contextLimitRelaunches += 1;
+  } else {
+    contextLimitUnitId = unitId;
+    contextLimitRelaunches = 1;
+  }
+
+  pendingSessionResetReason = `context-limit-${contextLimitRelaunches}`;
+  pendingRelaunchReason = `context-limit-${contextLimitRelaunches}`;
+  log(`context-limit-detected unit=${unitId} count=${contextLimitRelaunches}`);
+}
+
+function subscribeSession(nextSession) {
+  nextSession.subscribe((event) => {
   try {
+    if (event.type === "message_end" && event.message?.role === "assistant") {
+      const text = extractText(event.message.content);
+      if (text || event.message.errorMessage) markActivity();
+      if (text) log(`message-complete ${text.replace(/\s+/g, " ").slice(0, 500)}`);
+      if (event.message.stopReason === "error" && event.message.errorMessage) {
+        log(`assistant-error ${event.message.errorMessage}`);
+        maybeRotateOnUsageLimit(event.message.errorMessage);
+        maybeScheduleContextReset(event.message.errorMessage);
+      }
+      return;
+    }
+
     if (event.type === "message_complete") {
       const text = extractText(event.message?.content);
+      if (text) markActivity();
       if (text) log(`message-complete ${text.replace(/\s+/g, " ").slice(0, 500)}`);
       return;
     }
 
     if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
       const delta = event.assistantMessageEvent.delta?.replace(/\s+/g, " ");
-      if (delta?.trim()) log(`delta ${delta.slice(0, 200)}`);
+      if (delta?.trim()) {
+        markActivity();
+        log(`delta ${delta.slice(0, 200)}`);
+      }
       return;
     }
 
-    if (event.type === "tool_call_start") {
-      log(`tool-start ${event.toolCall?.name ?? "unknown"}`);
+    if (event.type === "tool_execution_start") {
+      markActivity();
+      log(`tool-start ${event.toolName ?? "unknown"}`);
       return;
     }
 
-    if (event.type === "tool_call_complete") {
-      log(`tool-complete ${event.toolCall?.name ?? "unknown"}`);
+    if (event.type === "tool_execution_update") {
+      markActivity();
+      log(`tool-update ${event.toolName ?? "unknown"}`);
+      return;
+    }
+
+    if (event.type === "tool_execution_end") {
+      markActivity();
+      log(`tool-complete ${event.toolName ?? "unknown"}`);
       return;
     }
 
     if (event.type === "error") {
+      markActivity();
       log(`error ${event.error?.message ?? "unknown"}`);
+      maybeRotateOnUsageLimit(event.error?.message ?? "");
+      maybeScheduleContextReset(event.error?.message ?? "");
     }
   } catch (error) {
     log(`event-log-error ${error instanceof Error ? error.message : String(error)}`);
   }
 });
+}
+
+async function createManagedSession() {
+  const { session: nextSession, extensionsResult } = await createAgentSession({
+    authStorage,
+    modelRegistry,
+    settingsManager,
+    sessionManager,
+    resourceLoader,
+  });
+
+  for (const err of extensionsResult.errors) {
+    log(`extension-error ${err.path}: ${err.error}`);
+  }
+
+  await nextSession.bindExtensions({
+    commandContextActions: {
+      waitForIdle: () => nextSession.agent.waitForIdle(),
+      newSession: async (options) => {
+        const success = await nextSession.newSession(options);
+        return { cancelled: !success };
+      },
+      fork: async (entryId) => {
+        const result = await nextSession.fork(entryId);
+        return { cancelled: result.cancelled };
+      },
+      navigateTree: async (targetId, options) => {
+        const result = await nextSession.navigateTree(targetId, {
+          summarize: options?.summarize,
+          customInstructions: options?.customInstructions,
+          replaceInstructions: options?.replaceInstructions,
+          label: options?.label,
+        });
+        return { cancelled: result.cancelled };
+      },
+      switchSession: async (sessionPath) => {
+        const success = await nextSession.switchSession(sessionPath);
+        return { cancelled: !success };
+      },
+      reload: async () => {
+        await nextSession.reload();
+      },
+    },
+    onError: (err) => {
+      log(`extension-error ${err.extensionPath}: ${err.error}`);
+    },
+  });
+
+  applyScopedModels(nextSession);
+  subscribeSession(nextSession);
+  const startedFresh = await nextSession.newSession();
+  if (!startedFresh) {
+    throw new Error("failed to open a fresh control session");
+  }
+  return nextSession;
+}
+
+async function resetSession(reason) {
+  log(`session-reset start reason=${reason}`);
+  try {
+    session?.dispose();
+  } catch {
+  }
+  markActivity();
+  session = await createManagedSession();
+  markActivity();
+  log(`session-reset complete reason=${reason} model=${session.model?.provider ?? "unknown"}/${session.model?.id ?? "unknown"}`);
+}
+
+session = await createManagedSession();
 
 let cleanedUp = false;
 async function cleanupAndExit(code) {
@@ -252,7 +410,11 @@ async function cleanupAndExit(code) {
     log(`cleanup-error ${error instanceof Error ? error.message : String(error)}`);
   }
   try {
-    session.dispose();
+    session?.dispose();
+  } catch {
+  }
+  try {
+    if (existsSync(autoLock)) unlinkSync(autoLock);
   } catch {
   }
   process.exit(code);
@@ -276,6 +438,16 @@ let consecutiveRelaunches = 0;
 while (true) {
   await new Promise((resolveDelay) => setTimeout(resolveDelay, 5000));
   const lockPresent = existsSync(autoLock);
+  const lock = readLockSnapshot();
+  const currentUnitId = lock?.unitId ?? null;
+  if (currentUnitId && contextLimitUnitId && currentUnitId !== contextLimitUnitId) {
+    contextLimitUnitId = null;
+    contextLimitRelaunches = 0;
+  }
+  if (currentUnitId && staleStreamUnitId && currentUnitId !== staleStreamUnitId) {
+    staleStreamUnitId = null;
+    staleStreamResets = 0;
+  }
   const streaming = session.isStreaming;
   const state = readStateSnapshot();
   const phase = state?.phase ?? "unknown";
@@ -283,8 +455,53 @@ while (true) {
   log(`heartbeat lock=${lockPresent} streaming=${streaming} phase=${phase} task=${activeTask}`);
 
   if (lockPresent || streaming) {
+    if (lockPresent && streaming && currentUnitId && Date.now() - lastActivityAt >= staleStreamingMs) {
+      if (staleStreamUnitId === currentUnitId) {
+        staleStreamResets += 1;
+      } else {
+        staleStreamUnitId = currentUnitId;
+        staleStreamResets = 1;
+      }
+
+      if (staleStreamResets > maxStaleStreamingResetsPerUnit) {
+        log(`headless-auto exit stale-stream-blocked unit=${currentUnitId} phase=${phase} task=${activeTask}`);
+        await cleanupAndExit(1);
+      }
+
+      log(`stale-stream-detected unit=${currentUnitId} idle_ms=${Date.now() - lastActivityAt} count=${staleStreamResets}`);
+      try {
+        if (existsSync(autoLock)) unlinkSync(autoLock);
+      } catch (error) {
+        log(`lock-cleanup-error ${error instanceof Error ? error.message : String(error)}`);
+      }
+      await resetSession(`stale-stream-${staleStreamResets}`);
+      const relaunched = await promptAuto(
+        session,
+        `stale-stream-${staleStreamResets} phase=${phase} task=${activeTask}`,
+      );
+      if (!relaunched) break;
+    }
     settledChecks = 0;
     consecutiveRelaunches = 0;
+    continue;
+  }
+
+  if (pendingRelaunchReason) {
+    const reason = pendingRelaunchReason;
+    pendingRelaunchReason = null;
+    settledChecks = 0;
+    consecutiveRelaunches = 0;
+    const contextResetPending = Boolean(pendingSessionResetReason);
+    if (pendingSessionResetReason || reason.startsWith("idle-relaunch") || reason === "usage-limit-rotate") {
+      if (contextResetPending && contextLimitRelaunches >= maxContextLimitRelaunchesPerUnit) {
+        log(`headless-auto exit context-limit-blocked unit=${contextLimitUnitId ?? "unknown"} phase=${phase} task=${activeTask}`);
+        await cleanupAndExit(1);
+      }
+      await resetSession(pendingSessionResetReason ?? reason);
+      pendingSessionResetReason = null;
+    }
+    const relaunched = await promptAuto(session, reason);
+    if (!relaunched) break;
     continue;
   }
 
@@ -300,6 +517,7 @@ while (true) {
 
   consecutiveRelaunches += 1;
   settledChecks = 0;
+  await resetSession(`idle-relaunch-${consecutiveRelaunches}`);
   const relaunched = await promptAuto(
     session,
     `idle-relaunch-${consecutiveRelaunches} phase=${phase} task=${activeTask}`,

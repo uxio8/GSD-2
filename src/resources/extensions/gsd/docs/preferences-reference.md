@@ -40,6 +40,15 @@ Full documentation for `~/.gsd/preferences.md` (global) and `.gsd/preferences.md
   - `idle_timeout_minutes`: minutes of inactivity before the supervisor intervenes (default: 10).
   - `hard_timeout_minutes`: minutes before the supervisor forces termination (default: 30).
 
+- `git`: configures GSD's git behavior. All fields are optional. Keys:
+  - `auto_push`: boolean — automatically push commits after committing. Default: `false`.
+  - `push_branches`: boolean — push newly created slice branches to the remote. Default: `false`.
+  - `remote`: string — git remote name to push to. Default: `"origin"`.
+  - `snapshots`: boolean — create snapshot refs before destructive merge operations. Default: `false`.
+  - `pre_merge_check`: boolean, `"auto"`, or a command string — run a verification step before finalizing a slice merge. Default: auto-detect when enabled.
+  - `commit_type`: string — override the conventional commit prefix used for slice merges. Allowed: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`, `build`, `style`.
+  - `main_branch`: string — preferred primary branch name when detection is ambiguous or when initializing new repos.
+
 ---
 
 ## Best Practices
@@ -88,6 +97,24 @@ skill_rules:
 
 ```yaml
 ---
+
+## Git Preferences Example
+
+```yaml
+---
+version: 1
+git:
+  auto_push: true
+  push_branches: true
+  remote: origin
+  snapshots: true
+  pre_merge_check: auto
+  commit_type: feat
+  main_branch: main
+---
+```
+
+All git fields are optional. Project-level preferences override global preferences on a per-field basis.
 version: 1
 prefer_skills:
   - commit-ignore
