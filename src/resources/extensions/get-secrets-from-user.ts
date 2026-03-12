@@ -6,6 +6,7 @@
  * Uses Node fs/promises for file I/O and pi.exec() for CLI sinks.
  */
 
+import { existsSync, statSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -25,6 +26,7 @@ interface ToolResultDetails {
 	environment?: string;
 	applied: string[];
 	skipped: string[];
+	detectedDestination?: string;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -91,6 +93,42 @@ async function writeEnvKey(filePath: string, key: string, value: string): Promis
 	await writeFile(filePath, content, "utf8");
 }
 
+export async function checkExistingEnvKeys(keys: string[], envFilePath: string): Promise<string[]> {
+	let fileContent = "";
+	try {
+		fileContent = await readFile(envFilePath, "utf8");
+	} catch {
+		// ENOENT or unreadable .env file — still check process.env.
+	}
+
+	const existing: string[] = [];
+	for (const key of keys) {
+		const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const regex = new RegExp(`^${escaped}\\s*=`, "m");
+		if (regex.test(fileContent) || key in process.env) {
+			existing.push(key);
+		}
+	}
+	return existing;
+}
+
+export function detectDestination(basePath: string): "dotenv" | "vercel" | "convex" {
+	if (existsSync(resolve(basePath, "vercel.json"))) {
+		return "vercel";
+	}
+
+	const convexPath = resolve(basePath, "convex");
+	try {
+		if (existsSync(convexPath) && statSync(convexPath).isDirectory()) {
+			return "convex";
+		}
+	} catch {
+		// Ignore stat errors and fall back to dotenv.
+	}
+
+	return "dotenv";
+}
+
 // ─── Paged secure input UI ────────────────────────────────────────────────────
 
 /**
@@ -103,6 +141,7 @@ async function collectOneSecret(
 	totalPages: number,
 	keyName: string,
 	hint: string | undefined,
+	guidance: string[] | undefined,
 ): Promise<string | null> {
 	if (!ctx.hasUI) return null;
 
@@ -160,6 +199,13 @@ async function collectOneSecret(
 			if (hint) {
 				add(theme.fg("muted", `  ${hint}`));
 			}
+			if (guidance && guidance.length > 0) {
+				lines.push("");
+				add(theme.fg("muted", "  Where to find it:"));
+				for (const step of guidance) {
+					add(theme.fg("muted", `   - ${step}`));
+				}
+			}
 			lines.push("");
 
 			// Masked preview
@@ -209,16 +255,17 @@ export default function secureEnv(pi: ExtensionAPI) {
 			"Never echo, log, or repeat secret values in your responses. Only report key names and applied/skipped status.",
 		],
 		parameters: Type.Object({
-			destination: Type.Union([
+			destination: Type.Optional(Type.Union([
 				Type.Literal("dotenv"),
 				Type.Literal("vercel"),
 				Type.Literal("convex"),
-			], { description: "Where to write the collected secrets" }),
+			], { description: "Where to write the collected secrets" })),
 			keys: Type.Array(
 				Type.Object({
 					key: Type.String({ description: "Env var name, e.g. OPENAI_API_KEY" }),
 					hint: Type.Optional(Type.String({ description: "Format hint shown to user, e.g. 'starts with sk-'" })),
 					required: Type.Optional(Type.Boolean()),
+					guidance: Type.Optional(Type.Array(Type.String(), { description: "Step-by-step guidance for where to find this key" })),
 				}),
 				{ minItems: 1 },
 			),
@@ -240,12 +287,14 @@ export default function secureEnv(pi: ExtensionAPI) {
 				};
 			}
 
+			const destinationAutoDetected = params.destination == null;
+			const destination = params.destination ?? detectDestination(ctx.cwd);
 			const collected: CollectedSecret[] = [];
 
 			// Collect one key per page
 			for (let i = 0; i < params.keys.length; i++) {
 				const item = params.keys[i];
-				const value = await collectOneSecret(ctx, i, params.keys.length, item.key, item.hint);
+				const value = await collectOneSecret(ctx, i, params.keys.length, item.key, item.hint, item.guidance);
 				collected.push({ key: item.key, value });
 			}
 
@@ -255,7 +304,7 @@ export default function secureEnv(pi: ExtensionAPI) {
 			const errors: string[] = [];
 
 			// Apply to destination
-			if (params.destination === "dotenv") {
+			if (destination === "dotenv") {
 				const filePath = resolve(ctx.cwd, params.envFilePath ?? ".env");
 				for (const { key, value } of provided) {
 					try {
@@ -267,7 +316,7 @@ export default function secureEnv(pi: ExtensionAPI) {
 				}
 			}
 
-			if (params.destination === "vercel") {
+			if (destination === "vercel") {
 				const env = params.environment ?? "development";
 				for (const { key, value } of provided) {
 					try {
@@ -286,7 +335,7 @@ export default function secureEnv(pi: ExtensionAPI) {
 				}
 			}
 
-			if (params.destination === "convex") {
+			if (destination === "convex") {
 				for (const { key, value } of provided) {
 					try {
 						const result = await pi.exec("sh", [
@@ -305,14 +354,15 @@ export default function secureEnv(pi: ExtensionAPI) {
 			}
 
 			const details: ToolResultDetails = {
-				destination: params.destination,
+				destination,
 				environment: params.environment,
 				applied,
 				skipped,
+				...(destinationAutoDetected ? { detectedDestination: destination } : {}),
 			};
 
 			const lines = [
-				`destination: ${params.destination}${params.environment ? ` (${params.environment})` : ""}`,
+				`destination: ${destination}${destinationAutoDetected ? " (auto-detected)" : ""}${params.environment ? ` (${params.environment})` : ""}`,
 				...applied.map((k) => `✓ ${k}: applied`),
 				...skipped.map((k) => `• ${k}: skipped`),
 				...errors.map((e) => `✗ ${e}`),
@@ -329,7 +379,7 @@ export default function secureEnv(pi: ExtensionAPI) {
 			const count = Array.isArray(args.keys) ? args.keys.length : 0;
 			return new Text(
 				theme.fg("toolTitle", theme.bold("secure_env_collect ")) +
-				theme.fg("muted", `→ ${args.destination}`) +
+				theme.fg("muted", `→ ${args.destination ?? "auto"}`) +
 				theme.fg("dim", `  ${count} key${count !== 1 ? "s" : ""}`),
 				0, 0,
 			);

@@ -618,7 +618,7 @@ function peekNext(unitType: string, state: GSDState): string {
   const sid = state.activeSlice?.id ?? "";
   switch (unitType) {
     case "research-milestone": return "plan milestone roadmap";
-    case "plan-milestone": return "research first slice";
+    case "plan-milestone": return "plan or execute first slice";
     case "research-slice": return `plan ${sid}`;
     case "plan-slice": return "execute first task";
     case "execute-task": return `continue ${sid}`;
@@ -893,6 +893,23 @@ function getRoadmapSlicesSync(): { done: number; total: number; activeSliceTasks
 
 // ─── Core Loop ────────────────────────────────────────────────────────────────
 
+async function cleanupConflictedMergeState(ctx: ExtensionContext): Promise<boolean> {
+  try {
+    const { runGit } = await import("./git-service.ts");
+    const status = runGit(basePath, ["status", "--porcelain"], { allowFailure: true });
+    if (!status) return false;
+
+    const conflictMarkers = ["UU ", "AA ", "UD ", "DU ", "AU ", "UA ", "DD "];
+    if (!conflictMarkers.some((marker) => status.includes(marker))) return false;
+
+    runGit(basePath, ["reset", "--hard", "HEAD"], { allowFailure: true });
+    ctx.ui.notify("Cleaned up conflicted merge state after failed squash-merge.", "warning");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function dispatchNextUnit(
   ctx: ExtensionContext,
   pi: ExtensionAPI,
@@ -949,10 +966,18 @@ async function dispatchNextUnit(
             midTitle = state.activeMilestone?.title;
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
-            ctx.ui.notify(`Slice merge failed: ${message}`, "error");
-            state = await deriveState(basePath);
-            mid = state.activeMilestone?.id;
-            midTitle = state.activeMilestone?.title;
+            await cleanupConflictedMergeState(ctx);
+            ctx.ui.notify(
+              `Slice merge failed — stopping auto-mode. Fix conflicts manually and restart.\n${message}`,
+              "error",
+            );
+            if (currentUnit) {
+              const modelId = ctx.model?.id ?? "unknown";
+              snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
+              saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
+            }
+            await stopAuto(ctx, pi);
+            return;
           }
         }
       }
@@ -981,6 +1006,7 @@ async function dispatchNextUnit(
       if (mid) currentMilestoneId = mid;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      await cleanupConflictedMergeState(ctx);
       ctx.ui.notify(
         `Pending slice merge failed: ${message}`,
         "error",
@@ -1104,9 +1130,17 @@ async function dispatchNextUnit(
       const hasResearch = !!(researchFile && await loadFile(researchFile));
 
       if (!hasResearch) {
-        unitType = "research-slice";
-        unitId = `${mid}/${sid}`;
-        prompt = await buildResearchSlicePrompt(mid, midTitle!, sid, sTitle, basePath);
+        const milestoneResearchFile = resolveMilestoneFile(basePath, mid, "RESEARCH");
+        const hasMilestoneResearch = !!(milestoneResearchFile && await loadFile(milestoneResearchFile));
+        if (hasMilestoneResearch && sid === "S01") {
+          unitType = "plan-slice";
+          unitId = `${mid}/${sid}`;
+          prompt = await buildPlanSlicePrompt(mid, midTitle!, sid, sTitle, basePath);
+        } else {
+          unitType = "research-slice";
+          unitId = `${mid}/${sid}`;
+          prompt = await buildResearchSlicePrompt(mid, midTitle!, sid, sTitle, basePath);
+        }
       } else {
         unitType = "plan-slice";
         unitId = `${mid}/${sid}`;

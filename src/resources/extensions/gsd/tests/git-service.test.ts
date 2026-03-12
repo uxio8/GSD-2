@@ -133,6 +133,37 @@ test("mergeSliceToMain creates snapshot, rich commit message, and auto-pushes ma
   assert.match(remoteMain, /fix\(M001\/S01\): Repair search flow/);
 });
 
+test("mergeSliceToMain resets conflicted squash merges back to a clean tree", (t) => {
+  const repo = createRepo();
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+
+  writeFileSync(join(repo, "shared.txt"), "main baseline\n", "utf-8");
+  run("git add shared.txt", repo);
+  run("git commit -m 'chore: add shared file'", repo);
+
+  const svc = new GitServiceImpl(repo, { pre_merge_check: false });
+
+  svc.ensureSliceBranch("M001", "S01");
+  writeFileSync(join(repo, "shared.txt"), "slice change\n", "utf-8");
+  run("git add shared.txt", repo);
+  run("git commit -m 'feat: change from slice branch'", repo);
+
+  svc.switchToMain();
+  writeFileSync(join(repo, "shared.txt"), "main change\n", "utf-8");
+  run("git add shared.txt", repo);
+  run("git commit -m 'feat: change from main branch'", repo);
+
+  assert.throws(
+    () => svc.mergeSliceToMain("M001", "S01", "Conflicting merge"),
+    /Working tree has been reset to a clean state/,
+  );
+
+  assert.equal(run("git status --short", repo), "");
+  assert.equal(readFileSync(join(repo, "shared.txt"), "utf-8"), "main change\n");
+  assert.equal(run("git branch --show-current", repo), "main");
+  assert.match(run("git branch --list gsd/M001/S01", repo), /gsd\/M001\/S01/);
+});
+
 test("runPreMergeCheck supports passing and failing custom commands", () => {
   const repo = createRepo();
   try {

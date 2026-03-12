@@ -451,7 +451,18 @@ export class GitServiceImpl {
       branch,
     );
 
-    this.git(["merge", "--squash", branch]);
+    try {
+      this.git(["merge", "--squash", branch]);
+    } catch (mergeError) {
+      this.git(["reset", "--hard", "HEAD"], { allowFailure: true });
+      const message = mergeError instanceof Error ? mergeError.message : String(mergeError);
+      throw new Error(
+        `Squash-merge of "${branch}" into "${mainBranch}" failed with conflicts. `
+        + `Working tree has been reset to a clean state. `
+        + `Resolve manually: git checkout ${mainBranch} && git merge --squash ${branch}\n`
+        + `Original error: ${message}`,
+      );
+    }
 
     const checkResult = this.runPreMergeCheck();
     if (!checkResult.passed && !checkResult.skipped) {

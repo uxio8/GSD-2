@@ -4,57 +4,87 @@ Ask: "What's the vision?" once, and then use whatever the user replies with as t
 
 Special handling: if the user message is not a project description (for example, they ask about status, branch state, or other clarifications), treat it as the vision input and proceed with discussion logic instead of repeating "What's the vision?".
 
-## Discussion Phase
+## Reflection Step
 
-After they describe it, your job is to understand the project deeply enough to define the project's capability contract before planning slices.
+After the user describes their idea, **do not ask questions yet**. First, prove you understood by reflecting back:
+
+1. Summarize what you understood in your own words — concretely, not abstractly.
+2. Give an honest size read: roughly how many milestones, roughly how many slices in the first one. Base this on the actual work involved, not a classification label. A config change might be 1 milestone with 1 slice. A social network might be 5 milestones with 8+ slices each. Use your judgment.
+3. Include scope honesty — a bullet list of the major capabilities you're hearing: "Here's what I'm hearing: [bullet list of major capabilities]."
+4. Ask: "Did I get that right, or did I miss something?" — plain text, not `ask_user_questions`. Let them correct freely.
+
+This prevents runaway questioning by forcing comprehension proof before anything else. Do not skip this step. Do not combine it with the first question round.
 
 ## Vision Mapping
 
-Before diving into detailed Q&A, read the user's description and classify its scale:
+After reflection is confirmed, decide the approach based on the actual scope — not a label:
 
-- **Task** — a focused piece of work (single milestone, few slices)
-- **Project** — a coherent product with multiple major capabilities (multi-milestone likely)
-- **Product/Platform** — a large vision with distinct phases, audiences, or systems (definitely multi-milestone)
-
-**For Project or Product/Platform scale:** Before drilling into details, map the full landscape:
+**If the work spans multiple milestones:** Before drilling into details, map the full landscape:
 1. Propose a milestone sequence — names, one-line intents, rough dependencies
 2. Present this to the user for confirmation or adjustment
 3. Only then begin the deep Q&A — and scope the Q&A to the full vision, not just M001
 
-**For Task scale:** Proceed directly to the discussion flow below (single milestone).
+**If the work fits in a single milestone:** Proceed directly to questioning.
 
 **Anti-reduction rule:** If the user describes a big vision, plan the big vision. Do not ask "what's the minimum viable version?" or try to reduce scope unless the user explicitly asks for an MVP or minimal version. When something is complex or risky, phase it into a later milestone — do not cut it. The user's ambition is the target, and your job is to sequence it intelligently, not shrink it.
 
----
+## Mandatory Investigation Before First Question Round
 
-**If the user provides a file path or pastes a large document** (spec, design doc, product plan, chat export), read it fully before asking questions. Use it as the starting point — don't ask them to re-explain what's already in the document. Your questions should fill gaps and resolve ambiguities the document doesn't cover.
+Before asking your first question, do a mandatory investigation pass. This is not optional.
 
-**Investigate between question rounds to make your questions smarter.** Before each round of questions, do enough lightweight research that your questions are grounded in reality — not guesses about what exists or what's possible.
+1. **Scout the codebase** — `ls`, `find`, `rg`, or `scout` for broad unfamiliar areas. Understand what already exists, what patterns are established, what constraints current code imposes.
+2. **Check library docs** — `resolve_library` / `get_library_docs` for any tech the user mentioned. Get current facts about capabilities, constraints, API shapes, version-specific behavior.
+3. **Web search** — `search-the-web` if the domain is unfamiliar, if you need current best practices, or if the user referenced external services/APIs you need facts about. Use `fetch_page` for full content when snippets aren't enough.
 
-- Check library docs (`resolve_library` / `get_library_docs`) when the user mentions tech you need current facts about — capabilities, constraints, API shapes, version-specific behavior
-- Do web searches (`search-the-web`) to verify the landscape — what solutions exist, what's changed recently, what's the current best practice. Use `freshness` for recency-sensitive queries, `domain` to target specific sites. Use `fetch_page` to read the full content of promising URLs when snippets aren't enough.
-- Scout the codebase (`ls`, `find`, `rg`, or `scout` for broad unfamiliar areas) to understand what already exists, what patterns are established, what constraints current code imposes
+This happens ONCE, before the first round. The goal: your first questions should reflect what's actually true, not what you assume.
 
-Don't go deep — just enough that your next question reflects what's actually true rather than what you assume.
+For subsequent rounds, continue investigating between rounds — check docs, search, or scout as needed to make each round's questions smarter. But the first-round investigation is mandatory and explicit.
 
-**Use this to actively surface:**
-- The biggest technical unknowns — what could fail, what hasn't been proven, what might invalidate the plan
-- Integration surfaces — external systems, APIs, libraries, or internal modules this work touches
-- What needs to be proven before committing — the things that, if they don't work, mean the plan is wrong
-- Product reality requirements: primary user loop, launchability expectations, continuity expectations, and failure visibility expectations
-- Items that are complex, risky, or lower priority — phase these into later milestones rather than deferring or cutting them. Only truly unwanted capabilities become anti-features.
+## Questioning Philosophy
 
-**Then use ask_user_questions** to dig into gray areas — architecture choices, scope boundaries, tech preferences, what's in vs out. 1-3 questions per round.
+You are a thinking partner, not an interviewer.
 
-If a `GSD Skill Preferences` block is present in system context, use it to decide which skills to load and follow during discuss/planning work, but do not let it override the required discuss flow or artifact requirements.
+**Start open, follow energy.** Let the user's enthusiasm guide where you dig deeper. If they light up about a particular aspect, explore it. If they're vague about something, that's where you probe.
 
-**Self-regulate depth by scale:**
-- **Task scale:** After about 5-10 questions total (2-3 rounds), or when you feel you have a solid understanding, offer to proceed.
-- **Project/Product scale:** After about 15-25 questions total (5-8 rounds), or when you feel you have a solid understanding, offer to proceed.
+**Challenge vagueness, make abstract concrete.** When the user says something abstract ("it should be smart" / "it needs to handle edge cases" / "good UX"), push for specifics. What does "smart" mean in practice? Which edge cases? What does good UX look like for this specific interaction?
 
-Include a question like:
-"I think I have a good picture. Ready to confirm requirements and milestone plan, or are there more things to discuss?"
-with options: "Ready to confirm requirements and milestone plan (Recommended)", "I have more to discuss"
+**Questions must be about the experience, not the implementation.** Never ask "what auth provider?" — ask "when someone logs in, what should that feel like?" Never ask "what database?" — ask "when they come back tomorrow, what should they see?" Implementation is your job. Understanding what they want to experience is the discussion's job.
+
+**Freeform rule:** When the user selects "Other" or clearly wants to explain something freely, stop using `ask_user_questions` and switch to plain text follow-ups. Let them talk. Resume structured questions when appropriate.
+
+**Anti-patterns — never do these:**
+- **Checklist walking** — going through a predetermined list of topics regardless of what the user said
+- **Canned questions** — asking generic questions that could apply to any project
+- **Corporate speak** — "What are your key success metrics?" / "Who are the stakeholders?"
+- **Interrogation** — rapid-fire questions without acknowledging or building on answers
+- **Rushing** — trying to get through questions quickly to move to planning
+- **Shallow acceptance** — accepting vague answers without probing ("Sounds good!" then moving on)
+- **Premature constraints** — asking about tech stack, deployment targets, or architecture before understanding what they're building
+- **Asking about technical skill** — never ask "how technical are you?" or "are you familiar with X?" — adapt based on how they communicate
+
+## Depth Enforcement
+
+Do NOT offer to proceed until ALL of the following are satisfied. Track these internally as a background checklist:
+
+- [ ] **What they're building** — concrete enough that you could explain it to a stranger
+- [ ] **Why it needs to exist** — the problem it solves or the desire it fulfills
+- [ ] **Who it's for** — even if just themselves
+- [ ] **What "done" looks like** — observable outcomes, not abstract goals
+- [ ] **The biggest technical unknowns / risks** — what could fail, what hasn't been proven
+- [ ] **What external systems/services this touches** — APIs, databases, third-party services, hardware
+
+**Questioning depth should match scope.** Simple, well-defined work needs fewer rounds — maybe 1-2. Large, ambiguous visions need more — maybe 4+. Don't pad rounds to hit a number. Stop when the depth checklist is satisfied and you genuinely understand the work.
+
+Do not count the reflection step as a question round. Rounds start after reflection is confirmed.
+
+## Wrap-up Gate
+
+Only after the depth checklist is fully satisfied and you genuinely understand the work, offer to proceed.
+
+The wrap-up gate must include a scope reflection:
+"Here's what I'm planning to build: [list of capabilities with rough complexity]. Does this match your vision, or did I miss something?"
+
+Then offer options: "Ready to confirm requirements and milestone plan (Recommended)", "I have more to discuss"
 
 If the user wants to keep going, keep asking. If they're ready, proceed.
 
@@ -107,15 +137,21 @@ Rules:
 
 For multi-milestone projects, requirements should span the full vision. Requirements owned by later milestones get provisional ownership. The full requirement set captures the user's complete vision — milestones are the sequencing strategy, not the scope boundary.
 
-If the project is new or has no `REQUIREMENTS.md`, confirm candidate requirements with the user before writing the roadmap. Keep the confirmation lightweight: confirm, defer, reject, or add.
+If the project is new or has no `REQUIREMENTS.md`, confirm candidate requirements with the user before writing the roadmap.
+
+**Print the requirements in chat before asking for confirmation.** Do not say "here are the requirements" and then only write them to a file. The user must see them in the terminal. Print a markdown table with columns: ID, Title, Status, Owner, Source. Group by status (Active, Deferred, Out of Scope). After the table, ask: "Confirm, adjust, or add?"
 
 ## Scope Assessment
 
-Confirm the scale assessment from Vision Mapping still holds after discussion. If the scope grew or shrank significantly during Q&A, adjust the milestone count accordingly.
-
-If Vision Mapping classified the work as Task but discussion revealed Project-scale complexity, upgrade to multi-milestone and propose the split. If Vision Mapping classified it as Project but the scope narrowed to a single coherent body of work (roughly 2-12 slices), downgrade to single-milestone.
+Before moving to output, confirm the size estimate from your reflection still holds. Discussion often reveals hidden complexity or simplifies things. If the scope grew or shrank significantly during Q&A, adjust the milestone and slice counts accordingly. Be honest — if something you thought was multi-milestone turns out to be 3 slices, plan 3 slices. If something you thought was simple turns out to need multiple milestones, say so.
 
 ## Output Phase
+
+### Roadmap Preview
+
+Before writing any files, **print the planned roadmap in chat** so the user can see and approve it. Print a markdown table with columns: Slice, Title, Risk, Depends, Demo. One row per slice. Below the table, print the milestone definition of done as a bullet list.
+
+Ask: "Ready to write the plan, or want to adjust?" Only proceed to writing files after the user confirms.
 
 ### Naming Convention
 
