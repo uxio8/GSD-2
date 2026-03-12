@@ -12,6 +12,8 @@ Pay particular attention to **Forward Intelligence** sections — they contain h
 
 {{dependencySummaries}}
 
+Narrate the important findings as they emerge — what changed your view of the slice, what risks look real, and what should shape the next phase.
+
 Then research what this slice needs:
 0. If `REQUIREMENTS.md` was preloaded above, identify which Active requirements this slice owns or supports. Research should target these requirements — surfacing risks, unknowns, and implementation constraints that could affect whether the slice actually delivers them.
 1. If a `GSD Skill Preferences` block is present in system context, use it to decide which skills to load and follow during research, without relaxing required verification or artifact rules

@@ -6,6 +6,8 @@ All relevant context has been preloaded below — start working immediately with
 
 {{inlinedContext}}
 
+Narrate your slice-ordering reasoning — what you're proving first, where the real risk is, and why each slice boundary is where it is.
+
 Then:
 1. Read the template at `~/.gsd/agent/extensions/gsd/templates/roadmap.md`
 2. Read `.gsd/REQUIREMENTS.md` if it exists. Treat **Active** requirements as the capability contract for planning. If it does not exist, continue in legacy compatibility mode but explicitly note that requirement coverage is operating without a contract.

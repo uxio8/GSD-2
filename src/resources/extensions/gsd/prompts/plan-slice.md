@@ -12,6 +12,8 @@ Pay particular attention to **Forward Intelligence** sections — they contain h
 
 {{dependencySummaries}}
 
+Narrate your decomposition reasoning — why you're grouping work this way, what risks are driving the order, what verification strategy you're choosing and why.
+
 Then:
 0. If `REQUIREMENTS.md` was preloaded above, identify which Active requirements the roadmap says this slice owns or supports. These are the requirements this plan must deliver — every owned requirement needs at least one task that directly advances it, and verification must prove the requirement is met.
 1. Read the templates:
@@ -53,7 +55,7 @@ Then:
     - **Proof honesty:** The `Proof Level` and `Integration Closure` sections match what this slice will actually prove, and they do not imply live end-to-end completion if only fixture or contract proof is planned.
     - **Feature completeness:** Every task produces real, user-facing progress — not just internal scaffolding. If the slice has a UI surface, at least one task builds the real UI (not a placeholder). If the slice has an API, at least one task connects it to a real data source (not hardcoded returns). If every task were completed and you showed the result to a non-technical stakeholder, they should see real product progress, not developer artifacts.
 13. If planning produced structural decisions (e.g. verification strategy, observability strategy, technology choices, patterns to follow), append them to `.gsd/DECISIONS.md`
-14. Commit: `docs({{sliceId}}): add slice plan`
+14. Do not commit manually — the system auto-commits your changes after this unit completes.
 15. Update `.gsd/STATE.md`
 
 The slice directory and tasks/ subdirectory already exist. Do NOT mkdir. You are on the slice branch; all work stays here.
