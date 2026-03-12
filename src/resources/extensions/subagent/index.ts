@@ -654,8 +654,7 @@ export default function (pi: ExtensionAPI) {
 					const output = isError
 						? (r.errorMessage || r.stderr || getFinalOutput(r.messages) || "(no output)")
 						: getFinalOutput(r.messages);
-					const preview = output.slice(0, 200) + (output.length > 200 ? "..." : "");
-					return `[${r.agent}] ${r.exitCode === 0 ? "completed" : `failed (exit ${r.exitCode})`}: ${preview || "(no output)"}`;
+					return `[${r.agent}] ${r.exitCode === 0 ? "completed" : `failed (exit ${r.exitCode})`}: ${output || "(no output)"}`;
 				});
 				return {
 					content: [

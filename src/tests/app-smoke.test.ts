@@ -92,7 +92,7 @@ test("loader sets all 4 GSD_ env vars and PI_PACKAGE_DIR", async () => {
   assert.ok(loaderSrc.includes("GSD_WORKFLOW_PATH"), "loader sets GSD_WORKFLOW_PATH");
   assert.ok(loaderSrc.includes("GSD_BUNDLED_EXTENSION_PATHS"), "loader sets GSD_BUNDLED_EXTENSION_PATHS");
 
-  // Verify all 11 extension entry points are referenced in loader
+  // Verify all bundled extension entry points are referenced in loader
   // Loader uses join() calls like join(agentDir, 'extensions', 'gsd', 'index.ts')
   // so we check for the distinguishing directory name of each extension
   const extNames = [
@@ -100,9 +100,13 @@ test("loader sets all 4 GSD_ env vars and PI_PACKAGE_DIR", async () => {
     "'bg-shell'",
     "'browser-tools'",
     "'context7'",
+    "'google-search'",
+    "'mcporter'",
     "'search-the-web'",
     "'slash-commands'",
     "'subagent'",
+    "'mac-tools'",
+    "'voice'",
     "'ask-user-questions.ts'",
     "'get-secrets-from-user.ts'",
   ];
@@ -130,7 +134,10 @@ test("initResources syncs extensions, agents, and AGENTS.md to target dir", asyn
     assert.ok(existsSync(join(fakeAgentDir, "extensions", "browser-tools", "index.ts")), "browser-tools synced");
     assert.ok(existsSync(join(fakeAgentDir, "extensions", "search-the-web", "index.ts")), "search-the-web synced");
     assert.ok(existsSync(join(fakeAgentDir, "extensions", "context7", "index.ts")), "context7 synced");
+    assert.ok(existsSync(join(fakeAgentDir, "extensions", "google-search", "index.ts")), "google-search synced");
+    assert.ok(existsSync(join(fakeAgentDir, "extensions", "mcporter", "index.ts")), "mcporter synced");
     assert.ok(existsSync(join(fakeAgentDir, "extensions", "subagent", "index.ts")), "subagent synced");
+    assert.ok(existsSync(join(fakeAgentDir, "extensions", "voice", "index.ts")), "voice synced");
 
     // Agents synced
     assert.ok(existsSync(join(fakeAgentDir, "agents", "scout.md")), "scout agent synced");
@@ -162,6 +169,7 @@ test("loadStoredEnvKeys hydrates process.env from auth.json", async () => {
     brave: { type: "api_key", key: "test-brave-key" },
     brave_answers: { type: "api_key", key: "test-answers-key" },
     context7: { type: "api_key", key: "test-ctx7-key" },
+    tavily: { type: "api_key", key: "test-tavily-key" },
   }));
 
   // Clear any existing env vars
@@ -169,10 +177,12 @@ test("loadStoredEnvKeys hydrates process.env from auth.json", async () => {
   const origBraveAnswers = process.env.BRAVE_ANSWERS_KEY;
   const origCtx7 = process.env.CONTEXT7_API_KEY;
   const origJina = process.env.JINA_API_KEY;
+  const origTavily = process.env.TAVILY_API_KEY;
   delete process.env.BRAVE_API_KEY;
   delete process.env.BRAVE_ANSWERS_KEY;
   delete process.env.CONTEXT7_API_KEY;
   delete process.env.JINA_API_KEY;
+  delete process.env.TAVILY_API_KEY;
 
   try {
     const auth = AuthStorage.create(authPath);
@@ -181,6 +191,7 @@ test("loadStoredEnvKeys hydrates process.env from auth.json", async () => {
     assert.equal(process.env.BRAVE_API_KEY, "test-brave-key", "BRAVE_API_KEY hydrated");
     assert.equal(process.env.BRAVE_ANSWERS_KEY, "test-answers-key", "BRAVE_ANSWERS_KEY hydrated");
     assert.equal(process.env.CONTEXT7_API_KEY, "test-ctx7-key", "CONTEXT7_API_KEY hydrated");
+    assert.equal(process.env.TAVILY_API_KEY, "test-tavily-key", "TAVILY_API_KEY hydrated");
     assert.equal(process.env.JINA_API_KEY, undefined, "JINA_API_KEY not set (not in auth)");
   } finally {
     // Restore original env
@@ -188,6 +199,7 @@ test("loadStoredEnvKeys hydrates process.env from auth.json", async () => {
     if (origBraveAnswers) process.env.BRAVE_ANSWERS_KEY = origBraveAnswers; else delete process.env.BRAVE_ANSWERS_KEY;
     if (origCtx7) process.env.CONTEXT7_API_KEY = origCtx7; else delete process.env.CONTEXT7_API_KEY;
     if (origJina) process.env.JINA_API_KEY = origJina; else delete process.env.JINA_API_KEY;
+    if (origTavily) process.env.TAVILY_API_KEY = origTavily; else delete process.env.TAVILY_API_KEY;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -221,7 +233,44 @@ test("loadStoredEnvKeys does not overwrite existing env vars", async () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 6. npm pack produces valid tarball with correct file layout
+// 6. project .env keys hydrate optional tool env vars
+// ═══════════════════════════════════════════════════════════════════════════
+
+test("loadProjectOptionalEnvKeys reads Context7 from .env.local without overwriting shell env", async () => {
+  const { loadProjectOptionalEnvKeys } = await import("../project-env.ts");
+
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-project-env-"));
+  const env = {} as NodeJS.ProcessEnv;
+
+  try {
+    writeFileSync(join(tmp, ".env"), [
+      "CONTEXT7_API_KEY=base-key",
+      "BRAVE_API_KEY=brave-base",
+      "TAVILY_API_KEY=tavily-base",
+    ].join("\n"));
+    writeFileSync(join(tmp, ".env.local"), [
+      "CONTEXT7_API_KEY=ctx7-local-key",
+      "TAVILY_API_KEY=tavily-local-key",
+    ].join("\n"));
+
+    const loaded = loadProjectOptionalEnvKeys(tmp, env);
+
+    assert.deepEqual(loaded.sort(), ["BRAVE_API_KEY", "CONTEXT7_API_KEY", "TAVILY_API_KEY"], "project env keys loaded");
+    assert.equal(env.CONTEXT7_API_KEY, "ctx7-local-key", ".env.local overrides .env");
+    assert.equal(env.BRAVE_API_KEY, "brave-base", ".env fallback applied");
+    assert.equal(env.TAVILY_API_KEY, "tavily-local-key", "Tavily key loaded from .env.local");
+
+    env.CONTEXT7_API_KEY = "shell-key";
+    const loadedSecond = loadProjectOptionalEnvKeys(tmp, env);
+    assert.ok(!loadedSecond.includes("CONTEXT7_API_KEY"), "existing env var not overwritten");
+    assert.equal(env.CONTEXT7_API_KEY, "shell-key", "shell env wins");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 7. npm pack produces valid tarball with correct file layout
 // ═══════════════════════════════════════════════════════════════════════════
 
 test("npm pack produces tarball with required files", async () => {

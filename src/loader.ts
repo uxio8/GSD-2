@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { fileURLToPath } from 'url'
 import { dirname, resolve, join } from 'path'
-import { existsSync, readFileSync } from 'fs'
-import { agentDir, appRoot } from './app-paths.js'
+import { readFileSync } from 'fs'
+import { agentDir } from './app-paths.js'
 
 // pkg/ is a shim directory: contains gsd's piConfig (package.json) and pi's
 // theme assets (dist/modes/interactive/theme/) without a src/ directory.
@@ -16,32 +16,6 @@ const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'pkg')
 process.env.PI_PACKAGE_DIR = pkgDir
 process.env.PI_SKIP_VERSION_CHECK = '1'  // GSD ships its own update check — suppress pi's
 process.title = 'gsd'
-
-// Print branded banner on first launch (before ~/.gsd/ exists)
-if (!existsSync(appRoot)) {
-  const cyan  = '\x1b[36m'
-  const green = '\x1b[32m'
-  const dim   = '\x1b[2m'
-  const reset = '\x1b[0m'
-  let version = ''
-  try {
-    const pkgJson = JSON.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8'))
-    version = pkgJson.version ?? ''
-  } catch { /* ignore */ }
-  process.stderr.write(
-    '\n' +
-    cyan +
-    '   ██████╗ ███████╗██████╗ \n' +
-    '  ██╔════╝ ██╔════╝██╔══██╗\n' +
-    '  ██║  ███╗███████╗██║  ██║\n' +
-    '  ██║   ██║╚════██║██║  ██║\n' +
-    '  ╚██████╔╝███████║██████╔╝\n' +
-    '   ╚═════╝ ╚══════╝╚═════╝ ' +
-    reset + '\n\n' +
-    `  Get Shit Done ${dim}v${version}${reset}\n` +
-    `  ${green}Welcome.${reset} Setting up your environment...\n\n`
-  )
-}
 
 // GSD_CODING_AGENT_DIR — tells pi's getAgentDir() to return ~/.gsd/agent/ instead of ~/.gsd/agent/
 process.env.GSD_CODING_AGENT_DIR = agentDir
@@ -91,10 +65,13 @@ process.env.GSD_BUNDLED_EXTENSION_PATHS = [
   join(agentDir, 'extensions', 'bg-shell', 'index.ts'),
   join(agentDir, 'extensions', 'browser-tools', 'index.ts'),
   join(agentDir, 'extensions', 'context7', 'index.ts'),
+  join(agentDir, 'extensions', 'google-search', 'index.ts'),
+  join(agentDir, 'extensions', 'mcporter', 'index.ts'),
   join(agentDir, 'extensions', 'search-the-web', 'index.ts'),
   join(agentDir, 'extensions', 'slash-commands', 'index.ts'),
   join(agentDir, 'extensions', 'subagent', 'index.ts'),
   join(agentDir, 'extensions', 'mac-tools', 'index.ts'),
+  join(agentDir, 'extensions', 'voice', 'index.ts'),
   join(agentDir, 'extensions', 'ask-user-questions.ts'),
   join(agentDir, 'extensions', 'get-secrets-from-user.ts'),
 ].join(':')

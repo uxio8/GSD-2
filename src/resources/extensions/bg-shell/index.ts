@@ -48,6 +48,7 @@ import { createConnection } from "node:net";
 import { randomUUID } from "node:crypto";
 import { writeFileSync, readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { shortcutDesc } from "../shared/terminal.js";
 import { createRequire } from "node:module";
 
 // ── Windows VT Input Restoration ────────────────────────────────────────────
@@ -2356,7 +2357,7 @@ export default function (pi: ExtensionAPI) {
 	// ── Ctrl+Alt+B shortcut ──────────────────────────────────────────────
 
 	pi.registerShortcut(Key.ctrlAlt("b"), {
-		description: "Open background process manager",
+		description: shortcutDesc("Open background process manager", "/bg"),
 		handler: async (ctx) => {
 			latestCtx = ctx;
 			await ctx.ui.custom<void>(

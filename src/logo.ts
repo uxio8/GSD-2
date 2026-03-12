@@ -1,0 +1,16 @@
+/**
+ * Shared GSD block-letter ASCII logo.
+ */
+
+export const GSD_LOGO: string[] = [
+  '   ██████╗ ███████╗██████╗ ',
+  '  ██╔════╝ ██╔════╝██╔══██╗',
+  '  ██║  ███╗███████╗██║  ██║',
+  '  ██║   ██║╚════██║██║  ██║',
+  '  ╚██████╔╝███████║██████╔╝',
+  '   ╚═════╝ ╚══════╝╚═════╝ ',
+]
+
+export function renderLogo(color: (s: string) => string): string {
+  return '\n' + GSD_LOGO.map(color).join('\n') + '\n'
+}

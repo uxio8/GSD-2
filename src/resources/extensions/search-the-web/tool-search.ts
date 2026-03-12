@@ -1,13 +1,5 @@
 /**
- * search-the-web tool — Rich web search with full Brave API support.
- *
- * v3 improvements:
- * - Structured error taxonomy (auth_error, rate_limited, network_error, etc.)
- * - Spellcheck/query correction surfacing
- * - Latency tracking in details
- * - more_results_available from Brave response
- * - Adaptive snippet budget (fewer results = more snippets each)
- * - Rate limit info in details
+ * search-the-web tool — Rich web search with Brave or Tavily.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -20,10 +12,8 @@ import { LRUTTLCache } from "./cache";
 import { fetchWithRetryTimed, fetchWithRetry, classifyError, type RateLimitInfo } from "./http";
 import { normalizeQuery, toDedupeKey, detectFreshness } from "./url-utils";
 import { formatSearchResults, type SearchResultFormatted, type FormatSearchOptions } from "./format";
-
-// =============================================================================
-// Types
-// =============================================================================
+import { getTavilyApiKey, resolveSearchProvider } from "./provider";
+import { normalizeTavilyResult, mapFreshnessToTavily, type TavilySearchResponse } from "./tavily";
 
 interface BraveWebResult {
   title: string;
@@ -66,13 +56,13 @@ interface BraveSearchResponse {
 interface CachedSearchResult {
   results: SearchResultFormatted[];
   summarizerKey?: string;
+  summaryText?: string;
   queryCorrected?: boolean;
   originalQuery?: string;
   correctedQuery?: string;
   moreResultsAvailable?: boolean;
 }
 
-/** Structured details returned from the search tool. */
 interface SearchDetails {
   query: string;
   effectiveQuery: string;
@@ -90,22 +80,13 @@ interface SearchDetails {
   errorKind?: string;
   error?: string;
   retryAfterMs?: number;
+  provider?: "tavily" | "brave";
 }
 
-// =============================================================================
-// Caches
-// =============================================================================
-
-// Search results: max 100 entries, 10-minute TTL
 const searchCache = new LRUTTLCache<CachedSearchResult>({ max: 100, ttlMs: 600_000 });
 searchCache.startPurgeInterval(60_000);
 
-// Summarizer responses: max 50 entries, 15-minute TTL
 const summarizerCache = new LRUTTLCache<string>({ max: 50, ttlMs: 900_000 });
-
-// =============================================================================
-// Brave API helpers
-// =============================================================================
 
 function getBraveApiKey(): string {
   return process.env.BRAVE_API_KEY || "";
@@ -113,15 +94,12 @@ function getBraveApiKey(): string {
 
 function braveHeaders(): Record<string, string> {
   return {
-    "Accept": "application/json",
+    Accept: "application/json",
     "Accept-Encoding": "gzip",
     "X-Subscription-Token": getBraveApiKey(),
   };
 }
 
-/**
- * Normalize a Brave result into our formatted result type.
- */
 function normalizeBraveResult(r: BraveWebResult): SearchResultFormatted {
   return {
     title: r.title || "(untitled)",
@@ -132,9 +110,6 @@ function normalizeBraveResult(r: BraveWebResult): SearchResultFormatted {
   };
 }
 
-/**
- * Deduplicate results by URL (first occurrence wins).
- */
 function deduplicateResults(results: SearchResultFormatted[]): SearchResultFormatted[] {
   const seen = new Map<string, SearchResultFormatted>();
   for (const result of results) {
@@ -146,13 +121,7 @@ function deduplicateResults(results: SearchResultFormatted[]): SearchResultForma
   return Array.from(seen.values());
 }
 
-/**
- * Fetch AI summary from Brave Summarizer API (best-effort, free).
- */
-async function fetchSummary(
-  summarizerKey: string,
-  signal?: AbortSignal
-): Promise<string | null> {
+async function fetchSummary(summarizerKey: string, signal?: AbortSignal): Promise<string | null> {
   const cached = summarizerCache.get(summarizerKey);
   if (cached !== undefined) return cached;
 
@@ -165,9 +134,8 @@ async function fetchSummary(
     }, 1);
 
     const data: BraveSummarizerResponse = await response.json();
-
     let summaryText = "";
-    if (data.summary && Array.isArray(data.summary)) {
+    if (Array.isArray(data.summary)) {
       summaryText = data.summary
         .filter((s) => s.type === "token" || s.type === "text")
         .map((s) => s.data)
@@ -184,9 +152,46 @@ async function fetchSummary(
   }
 }
 
-// =============================================================================
-// Tool Registration
-// =============================================================================
+async function executeTavilySearch(
+  params: { query: string; freshness: string | null; domain?: string; wantSummary: boolean },
+  signal?: AbortSignal,
+): Promise<{ results: CachedSearchResult; latencyMs: number; rateLimit?: RateLimitInfo }> {
+  const requestBody: Record<string, unknown> = {
+    query: params.query,
+    max_results: 10,
+    search_depth: "basic",
+  };
+
+  const tavilyTimeRange = mapFreshnessToTavily(params.freshness);
+  if (tavilyTimeRange) requestBody.time_range = tavilyTimeRange;
+  if (params.domain) requestBody.include_domains = [params.domain];
+  if (params.wantSummary) requestBody.include_answer = true;
+
+  const timed = await fetchWithRetryTimed("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${getTavilyApiKey()}`,
+    },
+    body: JSON.stringify(requestBody),
+    signal,
+  }, 2);
+
+  const data: TavilySearchResponse = await timed.response.json();
+  const normalized = data.results.map(normalizeTavilyResult);
+  const deduplicated = deduplicateResults(normalized);
+
+  return {
+    results: {
+      results: deduplicated,
+      summaryText: data.answer || undefined,
+      queryCorrected: false,
+      moreResultsAvailable: false,
+    },
+    latencyMs: timed.latencyMs,
+    rateLimit: timed.rateLimit,
+  };
+}
 
 export function registerSearchTool(pi: ExtensionAPI) {
   pi.registerTool({
@@ -207,24 +212,24 @@ export function registerSearchTool(pi: ExtensionAPI) {
     parameters: Type.Object({
       query: Type.String({ description: "Search query (e.g., 'latest AI news')" }),
       count: Type.Optional(
-        Type.Number({ minimum: 1, maximum: 10, default: 5, description: "Number of results to return (default: 5)" })
+        Type.Number({ minimum: 1, maximum: 10, default: 5, description: "Number of results to return (default: 5)" }),
       ),
       freshness: Type.Optional(
         StringEnum(["auto", "day", "week", "month", "year"] as const, {
           description:
             "Filter by recency. 'auto' (default) detects from query. 'day'=past 24h, 'week'=past 7d, 'month'=past 30d, 'year'=past 365d.",
-        })
+        }),
       ),
       domain: Type.Optional(
         Type.String({
           description: "Limit results to a specific domain (e.g., 'stackoverflow.com', 'github.com')",
-        })
+        }),
       ),
       summary: Type.Optional(
         Type.Boolean({
           description: "Request an AI-generated summary of the search results (default: false). Adds latency but provides a concise answer.",
           default: false,
-        })
+        }),
       ),
     }),
 
@@ -233,53 +238,45 @@ export function registerSearchTool(pi: ExtensionAPI) {
         return { content: [{ type: "text", text: "Search cancelled." }] };
       }
 
-      const apiKey = getBraveApiKey();
-      if (!apiKey) {
+      const provider = resolveSearchProvider();
+      if (!provider) {
         return {
-          content: [{ type: "text", text: "Web search unavailable: BRAVE_API_KEY is not set. Use secure_env_collect to set BRAVE_API_KEY." }],
+          content: [{ type: "text", text: "Web search unavailable: No search API key is set. Use secure_env_collect to set TAVILY_API_KEY or BRAVE_API_KEY." }],
           isError: true,
-          details: { errorKind: "auth_error", error: "BRAVE_API_KEY not set" } satisfies Partial<SearchDetails>,
+          details: { errorKind: "auth_error", error: "No search API key set" } satisfies Partial<SearchDetails>,
         };
       }
 
       const count = params.count ?? 5;
       const wantSummary = params.summary ?? false;
 
-      // ------------------------------------------------------------------
-      // Resolve freshness
-      // ------------------------------------------------------------------
       let freshness: string | null = null;
       if (params.freshness && params.freshness !== "auto") {
         const freshnessMap: Record<string, string> = {
-          day: "pd", week: "pw", month: "pm", year: "py",
+          day: "pd",
+          week: "pw",
+          month: "pm",
+          year: "py",
         };
         freshness = freshnessMap[params.freshness] || null;
       } else {
         freshness = detectFreshness(params.query);
       }
 
-      // ------------------------------------------------------------------
-      // Handle domain filter
-      // ------------------------------------------------------------------
       let effectiveQuery = params.query;
-      if (params.domain) {
-        if (!effectiveQuery.toLowerCase().includes("site:")) {
-          effectiveQuery = `site:${params.domain} ${effectiveQuery}`;
-        }
+      if (provider === "brave" && params.domain && !effectiveQuery.toLowerCase().includes("site:")) {
+        effectiveQuery = `site:${params.domain} ${effectiveQuery}`;
       }
 
-      // ------------------------------------------------------------------
-      // Cache lookup
-      // ------------------------------------------------------------------
-      const cacheKey = normalizeQuery(effectiveQuery) + `|f:${freshness || ""}|s:${wantSummary}`;
+      const cacheKey = normalizeQuery(effectiveQuery) + `|f:${freshness || ""}|s:${wantSummary}|p:${provider}`;
       const cached = searchCache.get(cacheKey);
 
       if (cached) {
         const limited = cached.results.slice(0, count);
-
         let summaryText: string | undefined;
-        if (wantSummary && cached.summarizerKey) {
-          summaryText = (await fetchSummary(cached.summarizerKey, signal)) ?? undefined;
+        if (wantSummary) {
+          if (cached.summaryText) summaryText = cached.summaryText;
+          else if (cached.summarizerKey) summaryText = (await fetchSummary(cached.summarizerKey, signal)) ?? undefined;
         }
 
         const formatOpts: FormatSearchOptions = {
@@ -290,9 +287,7 @@ export function registerSearchTool(pi: ExtensionAPI) {
           correctedQuery: cached.correctedQuery,
           moreResultsAvailable: cached.moreResultsAvailable,
         };
-
         const output = formatSearchResults(params.query, limited, formatOpts);
-
         const truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
         let content = truncation.content;
         if (truncation.truncated) {
@@ -312,108 +307,81 @@ export function registerSearchTool(pi: ExtensionAPI) {
           originalQuery: cached.originalQuery,
           correctedQuery: cached.correctedQuery,
           moreResultsAvailable: cached.moreResultsAvailable,
+          provider,
         };
-
         return { content: [{ type: "text", text: content }], details };
       }
 
       onUpdate?.({ content: [{ type: "text", text: `Searching for "${params.query}"...` }] });
 
       try {
-        // ------------------------------------------------------------------
-        // Build Brave API request
-        // ------------------------------------------------------------------
-        const url = new URL("https://api.search.brave.com/res/v1/web/search");
-        url.searchParams.append("q", effectiveQuery);
-        url.searchParams.append("count", "10"); // Extra for dedup headroom
-        url.searchParams.append("extra_snippets", "true");
-        url.searchParams.append("text_decorations", "false");
+        let searchResult: CachedSearchResult;
+        let latencyMs: number | undefined;
+        let rateLimit: RateLimitInfo | undefined;
 
-        if (freshness) {
-          url.searchParams.append("freshness", freshness);
-        }
-        if (wantSummary) {
-          url.searchParams.append("summary", "1");
-        }
+        if (provider === "tavily") {
+          const tavilyResult = await executeTavilySearch(
+            { query: params.query, freshness, domain: params.domain, wantSummary },
+            signal,
+          );
+          searchResult = tavilyResult.results;
+          latencyMs = tavilyResult.latencyMs;
+          rateLimit = tavilyResult.rateLimit;
+        } else {
+          const url = new URL("https://api.search.brave.com/res/v1/web/search");
+          url.searchParams.append("q", effectiveQuery);
+          url.searchParams.append("count", "10");
+          url.searchParams.append("extra_snippets", "true");
+          url.searchParams.append("text_decorations", "false");
+          if (freshness) url.searchParams.append("freshness", freshness);
+          if (wantSummary) url.searchParams.append("summary", "1");
 
-        // ------------------------------------------------------------------
-        // Execute with timing
-        // ------------------------------------------------------------------
-        let timed;
-        try {
-          timed = await fetchWithRetryTimed(url.toString(), {
+          const timed = await fetchWithRetryTimed(url.toString(), {
             method: "GET",
             headers: braveHeaders(),
             signal,
           }, 2);
-        } catch (fetchErr) {
-          const classified = classifyError(fetchErr);
-          return {
-            content: [{ type: "text", text: `Search failed: ${classified.message}` }],
-            details: {
-              errorKind: classified.kind,
-              error: classified.message,
-              retryAfterMs: classified.retryAfterMs,
-              query: params.query,
-            } satisfies Partial<SearchDetails>,
-            isError: true,
+
+          const data: BraveSearchResponse = await timed.response.json();
+          const rawResults = data.web?.results ?? [];
+          const summarizerKey = data.summarizer?.key;
+          const queryInfo = data.query;
+          const queryCorrected = !!(queryInfo?.altered && queryInfo.altered !== queryInfo.original);
+          const originalQuery = queryCorrected ? (queryInfo?.original ?? params.query) : undefined;
+          const correctedQuery = queryCorrected ? queryInfo?.altered : undefined;
+          const moreResultsAvailable = queryInfo?.more_results_available ?? false;
+
+          searchResult = {
+            results: deduplicateResults(rawResults.map(normalizeBraveResult)),
+            summarizerKey,
+            queryCorrected,
+            originalQuery,
+            correctedQuery,
+            moreResultsAvailable,
           };
+          latencyMs = timed.latencyMs;
+          rateLimit = timed.rateLimit;
         }
 
-        const data: BraveSearchResponse = await timed.response.json();
-        const rawResults: BraveWebResult[] = data.web?.results ?? [];
-        const summarizerKey: string | undefined = data.summarizer?.key;
+        searchCache.set(cacheKey, searchResult);
+        const results = searchResult.results.slice(0, count);
 
-        // ------------------------------------------------------------------
-        // Extract spellcheck/correction info
-        // ------------------------------------------------------------------
-        const queryInfo = data.query;
-        const queryCorrected = !!(queryInfo?.altered && queryInfo.altered !== queryInfo.original);
-        const originalQuery = queryCorrected ? (queryInfo?.original ?? params.query) : undefined;
-        const correctedQuery = queryCorrected ? queryInfo?.altered : undefined;
-        const moreResultsAvailable = queryInfo?.more_results_available ?? false;
-
-        // ------------------------------------------------------------------
-        // Normalize, deduplicate, cache
-        // ------------------------------------------------------------------
-        const normalized = rawResults.map(normalizeBraveResult);
-        const deduplicated = deduplicateResults(normalized);
-
-        searchCache.set(cacheKey, {
-          results: deduplicated,
-          summarizerKey,
-          queryCorrected,
-          originalQuery,
-          correctedQuery,
-          moreResultsAvailable,
-        });
-
-        const results = deduplicated.slice(0, count);
-
-        // ------------------------------------------------------------------
-        // Optionally fetch AI summary (best-effort)
-        // ------------------------------------------------------------------
         let summaryText: string | undefined;
-        if (wantSummary && summarizerKey) {
-          summaryText = (await fetchSummary(summarizerKey, signal)) ?? undefined;
+        if (wantSummary) {
+          if (searchResult.summaryText) summaryText = searchResult.summaryText;
+          else if (searchResult.summarizerKey) summaryText = (await fetchSummary(searchResult.summarizerKey, signal)) ?? undefined;
         }
 
-        // ------------------------------------------------------------------
-        // Format output
-        // ------------------------------------------------------------------
         const formatOpts: FormatSearchOptions = {
           summary: summaryText,
-          queryCorrected,
-          originalQuery,
-          correctedQuery,
-          moreResultsAvailable,
+          queryCorrected: searchResult.queryCorrected,
+          originalQuery: searchResult.originalQuery,
+          correctedQuery: searchResult.correctedQuery,
+          moreResultsAvailable: searchResult.moreResultsAvailable,
         };
-
         const output = formatSearchResults(params.query, results, formatOpts);
-
         const truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
         let content = truncation.content;
-
         if (truncation.truncated) {
           const tempFile = await pi.writeTempFile(output, { prefix: "web-search-" });
           content += `\n\n[Truncated: ${truncation.outputLines}/${truncation.totalLines} lines (${formatSize(truncation.outputBytes)}/${formatSize(truncation.totalBytes)}). Full results: ${tempFile}]`;
@@ -427,14 +395,14 @@ export function registerSearchTool(pi: ExtensionAPI) {
           cached: false,
           freshness: freshness || "none",
           hasSummary: !!summaryText,
-          latencyMs: timed.latencyMs,
-          rateLimit: timed.rateLimit,
-          queryCorrected,
-          originalQuery,
-          correctedQuery,
-          moreResultsAvailable,
+          latencyMs,
+          rateLimit,
+          queryCorrected: searchResult.queryCorrected,
+          originalQuery: searchResult.originalQuery,
+          correctedQuery: searchResult.correctedQuery,
+          moreResultsAvailable: searchResult.moreResultsAvailable,
+          provider,
         };
-
         return { content: [{ type: "text", text: content }], details };
       } catch (error) {
         const classified = classifyError(error);
@@ -443,7 +411,9 @@ export function registerSearchTool(pi: ExtensionAPI) {
           details: {
             errorKind: classified.kind,
             error: classified.message,
+            retryAfterMs: classified.retryAfterMs,
             query: params.query,
+            provider,
           } satisfies Partial<SearchDetails>,
           isError: true,
         };
@@ -462,7 +432,6 @@ export function registerSearchTool(pi: ExtensionAPI) {
       if (meta.length > 0) {
         text += " " + theme.fg("dim", `(${meta.join(", ")})`);
       }
-
       return new Text(text, 0, 0);
     },
 
@@ -473,6 +442,7 @@ export function registerSearchTool(pi: ExtensionAPI) {
         return new Text(theme.fg("error", `✗ ${details.error ?? "Search failed"}`) + kindTag, 0, 0);
       }
 
+      const providerTag = details?.provider ? theme.fg("dim", ` [${details.provider}]`) : "";
       const cacheTag = details?.cached ? theme.fg("dim", " [cached]") : "";
       const freshTag = details?.freshness && details.freshness !== "none"
         ? theme.fg("dim", ` [${details.freshness}]`)
@@ -484,7 +454,7 @@ export function registerSearchTool(pi: ExtensionAPI) {
         : "";
 
       let text = theme.fg("success", `✓ ${details?.count ?? 0} results for "${details?.query}"`) +
-        cacheTag + freshTag + summaryTag + latencyTag + correctedTag;
+        providerTag + cacheTag + freshTag + summaryTag + latencyTag + correctedTag;
 
       if (expanded && details?.results) {
         text += "\n\n";
