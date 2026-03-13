@@ -182,5 +182,10 @@ export interface GSDState {
     milestones: { done: number; total: number };
     slices?: { done: number; total: number };
     tasks?: { done: number; total: number };
+    overall?: {
+      milestones: { done: number; total: number };
+      slices: { done: number; total: number };
+      tasks: { done: number; total: number };
+    };
   };
 }

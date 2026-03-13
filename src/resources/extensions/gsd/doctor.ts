@@ -108,6 +108,10 @@ function buildStateMarkdown(state: Awaited<ReturnType<typeof deriveState>>): str
   if (state.requirements) {
     lines.push(`**Requirements Status:** ${state.requirements.active} active · ${state.requirements.validated} validated · ${state.requirements.deferred} deferred · ${state.requirements.outOfScope} out of scope`);
   }
+  if (state.progress?.overall) {
+    const overall = state.progress.overall;
+    lines.push(`**Overall Progress:** ${overall.tasks.done}/${overall.tasks.total} tasks · ${overall.slices.done}/${overall.slices.total} slices · ${overall.milestones.done}/${overall.milestones.total} milestones`);
+  }
   lines.push("");
   lines.push("## Milestone Registry");
 

@@ -48,6 +48,7 @@
     "@google/genai": "^1.22.0",
     "@clack/prompts": "^1.1.0",
     "@mariozechner/pi-coding-agent": "^0.57.1",
+    "picomatch": "^2.3.1",
     "picocolors": "^1.1.1",
     "playwright": "^1.58.2"
   },

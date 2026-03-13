@@ -95,9 +95,12 @@ export default function (pi: ExtensionAPI) {
   // Windows where process killing is unreliable (see #40). We wrap execute
   // to inject a 120-second default when no timeout is provided.
   const DEFAULT_BASH_TIMEOUT_SECS = 120;
-  const baseBash = createBashTool(process.cwd(), {
-    spawnHook: (ctx) => ({ ...ctx, cwd: process.cwd() }),
-  });
+  const createDynamicBash = (artifactManager?: unknown) =>
+    createBashTool(process.cwd(), {
+      spawnHook: (ctx) => ({ ...ctx, cwd: process.cwd() }),
+      ...(artifactManager ? { artifactManager: artifactManager as any } : {}),
+    } as any);
+  const baseBash = createDynamicBash();
   const dynamicBash = {
     ...baseBash,
     execute: async (
@@ -107,11 +110,12 @@ export default function (pi: ExtensionAPI) {
       onUpdate?: any,
       ctx?: any,
     ) => {
+      const runtimeBash = createDynamicBash(ctx?.sessionManager?.getArtifactManager?.());
       const paramsWithTimeout = {
         ...params,
         timeout: params.timeout ?? DEFAULT_BASH_TIMEOUT_SECS,
       };
-      return baseBash.execute(toolCallId, paramsWithTimeout, signal, onUpdate, ctx);
+      return runtimeBash.execute(toolCallId, paramsWithTimeout, signal, onUpdate, ctx);
     },
   };
   pi.registerTool(dynamicBash as any);

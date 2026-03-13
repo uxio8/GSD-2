@@ -1,5 +1,386 @@
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/config.js b/node_modules/@mariozechner/pi-coding-agent/dist/config.js
+index 51cdae9..d718c68 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/config.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/config.js
+@@ -196,6 +196,10 @@ export function getPromptsDir() {
+ export function getSessionsDir() {
+     return join(getAgentDir(), "sessions");
+ }
++/** Get path to blob storage directory */
++export function getBlobsDir() {
++    return join(getAgentDir(), "blobs");
++}
+ /** Get path to debug log file */
+ export function getDebugLogPath() {
+     return join(getAgentDir(), `${APP_NAME}-debug.log`);
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
+index 90622c2..c42d9f4 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
+@@ -1750,7 +1750,10 @@ export class AgentSession {
+             ? this._baseToolsOverride
+             : createAllTools(this._cwd, {
+                 read: { autoResizeImages },
+-                bash: { commandPrefix: shellCommandPrefix },
++                bash: {
++                    commandPrefix: shellCommandPrefix,
++                    artifactManager: this.sessionManager.getArtifactManager?.() ?? undefined,
++                },
+             });
+         this._baseToolRegistry = new Map(Object.entries(baseTools).map(([name, tool]) => [name, tool]));
+         const extensionsResult = this._resourceLoader.getExtensions();
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/artifact-manager.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/artifact-manager.js
+new file mode 100644
+index 0000000..c4ebbd2
+--- /dev/null
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/artifact-manager.js
+@@ -0,0 +1,67 @@
++import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
++import { join } from "node:path";
++
++export class ArtifactManager {
++    #nextId = 0;
++    #dirCreated = false;
++    #initialized = false;
++    #dir;
++    constructor(sessionFile) {
++        this.#dir = sessionFile.slice(0, -6);
++    }
++    get dir() {
++        return this.#dir;
++    }
++    #ensureDir() {
++        if (!this.#dirCreated) {
++            mkdirSync(this.#dir, { recursive: true });
++            this.#dirCreated = true;
++        }
++        if (!this.#initialized) {
++            this.#scanExistingIds();
++            this.#initialized = true;
++        }
++    }
++    #scanExistingIds() {
++        const files = this.listFiles();
++        let maxId = -1;
++        for (const file of files) {
++            const match = file.match(/^(\d+)\..*\.log$/);
++            if (!match)
++                continue;
++            const id = parseInt(match[1], 10);
++            if (id > maxId)
++                maxId = id;
++        }
++        this.#nextId = maxId + 1;
++    }
++    allocateId() {
++        return this.#nextId++;
++    }
++    allocatePath(toolType) {
++        this.#ensureDir();
++        const id = String(this.allocateId());
++        const filename = `${id}.${toolType}.log`;
++        return { id, path: join(this.#dir, filename) };
++    }
++    save(content, toolType) {
++        const { id, path } = this.allocatePath(toolType);
++        writeFileSync(path, content);
++        return id;
++    }
++    exists(id) {
++        return this.listFiles().some((file) => file.startsWith(`${id}.`));
++    }
++    listFiles() {
++        try {
++            return readdirSync(this.#dir);
++        }
++        catch {
++            return [];
++        }
++    }
++    getPath(id) {
++        const match = this.listFiles().find((file) => file.startsWith(`${id}.`));
++        return match ? join(this.#dir, match) : null;
++    }
++}
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/blob-store.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/blob-store.js
+new file mode 100644
+index 0000000..42e45c7
+--- /dev/null
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/blob-store.js
+@@ -0,0 +1,72 @@
++import { createHash } from "node:crypto";
++import { accessSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
++import { join } from "node:path";
++
++const BLOB_PREFIX = "blob:sha256:";
++const SHA256_HEX_RE = /^[a-f0-9]{64}$/;
++
++export class BlobStore {
++    dir;
++    constructor(dir) {
++        this.dir = dir;
++        mkdirSync(dir, { recursive: true });
++    }
++    put(data) {
++        const hash = createHash("sha256").update(data).digest("hex");
++        const blobPath = join(this.dir, hash);
++        const result = {
++            hash,
++            path: blobPath,
++            get ref() {
++                return `${BLOB_PREFIX}${hash}`;
++            },
++        };
++        if (!existsSync(blobPath)) {
++            writeFileSync(blobPath, data);
++        }
++        return result;
++    }
++    get(hash) {
++        if (!SHA256_HEX_RE.test(hash))
++            return null;
++        try {
++            return readFileSync(join(this.dir, hash));
++        }
++        catch {
++            return null;
++        }
++    }
++    has(hash) {
++        if (!SHA256_HEX_RE.test(hash))
++            return false;
++        try {
++            accessSync(join(this.dir, hash));
++            return true;
++        }
++        catch {
++            return false;
++        }
++    }
++}
++export function isBlobRef(data) {
++    return data.startsWith(BLOB_PREFIX);
++}
++export function parseBlobRef(data) {
++    if (!data.startsWith(BLOB_PREFIX))
++        return null;
++    const hash = data.slice(BLOB_PREFIX.length);
++    return SHA256_HEX_RE.test(hash) ? hash : null;
++}
++export function externalizeImageData(blobStore, base64Data) {
++    if (isBlobRef(base64Data))
++        return base64Data;
++    const buffer = Buffer.from(base64Data, "base64");
++    return blobStore.put(buffer).ref;
++}
++export function resolveImageData(blobStore, data) {
++    const hash = parseBlobRef(data);
++    if (!hash)
++        return data;
++    const buffer = blobStore.get(hash);
++    return buffer ? buffer.toString("base64") : data;
++}
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/session-manager.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/session-manager.js
+index d0cdaf5..7ceb9cb 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/core/session-manager.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/session-manager.js
+@@ -2,9 +2,14 @@ import { randomUUID } from "crypto";
+ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync, } from "fs";
+ import { readdir, readFile, stat } from "fs/promises";
+ import { join, resolve } from "path";
+-import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
++import { getAgentDir as getDefaultAgentDir, getBlobsDir, getSessionsDir } from "../config.js";
+ import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage, } from "./messages.js";
++import { ArtifactManager } from "./artifact-manager.js";
++import { BlobStore, externalizeImageData, isBlobRef, resolveImageData } from "./blob-store.js";
+ export const CURRENT_SESSION_VERSION = 3;
++const BLOB_EXTERNALIZE_THRESHOLD = 1024;
++const MAX_PERSIST_CHARS = 500000;
++const TRUNCATION_NOTICE = "\n\n[Session persistence truncated large content]";
+ /** Generate a unique short ID (8 hex chars, collision-checked) */
+ function generateId(byId) {
+     for (let i = 0; i < 100; i++) {
+@@ -213,6 +218,92 @@ function getDefaultSessionDir(cwd) {
+     }
+     return sessionDir;
+ }
++function isImageBlock(value) {
++    return typeof value === "object" &&
++        value !== null &&
++        "type" in value &&
++        value.type === "image" &&
++        "data" in value &&
++        typeof value.data === "string";
++}
++function truncateString(value, maxLength) {
++    if (value.length <= maxLength)
++        return value;
++    if (maxLength > 0 && value.charCodeAt(maxLength - 1) >= 55296 && value.charCodeAt(maxLength - 1) <= 56319) {
++        return value.slice(0, maxLength - 1);
++    }
++    return value.slice(0, maxLength);
++}
++function prepareForPersistence(obj, blobStore, key) {
++    if (obj === null || obj === undefined)
++        return obj;
++    if (typeof obj === "string") {
++        if (obj.length <= MAX_PERSIST_CHARS)
++            return obj;
++        if (key === "thinkingSignature" || key === "thoughtSignature" || key === "textSignature") {
++            return "";
++        }
++        const limit = Math.max(0, MAX_PERSIST_CHARS - TRUNCATION_NOTICE.length);
++        return `${truncateString(obj, limit)}${TRUNCATION_NOTICE}`;
++    }
++    if (Array.isArray(obj)) {
++        let changed = false;
++        const result = obj.map((item) => {
++            if (key === "content" && isImageBlock(item)) {
++                if (!isBlobRef(item.data) && item.data.length >= BLOB_EXTERNALIZE_THRESHOLD) {
++                    changed = true;
++                    return { ...item, data: externalizeImageData(blobStore, item.data) };
++                }
++            }
++            const next = prepareForPersistence(item, blobStore, key);
++            if (next !== item)
++                changed = true;
++            return next;
++        });
++        return changed ? result : obj;
++    }
++    if (typeof obj === "object") {
++        let changed = false;
++        const result = {};
++        for (const [entryKey, entryValue] of Object.entries(obj)) {
++            if (entryKey === "partialJson" || entryKey === "jsonlEvents") {
++                changed = true;
++                continue;
++            }
++            const nextValue = prepareForPersistence(entryValue, blobStore, entryKey);
++            result[entryKey] = nextValue;
++            if (nextValue !== entryValue)
++                changed = true;
++        }
++        if (changed && "lineCount" in result && "content" in result && typeof result.content === "string") {
++            result.lineCount = result.content.split("\n").length;
++        }
++        return changed ? result : obj;
++    }
++    return obj;
++}
++function resolveBlobRefsInEntries(entries, blobStore) {
++    for (const entry of entries) {
++        if (entry.type === "session")
++            continue;
++        let contentArray;
++        if (entry.type === "message") {
++            const content = entry.message?.content;
++            if (Array.isArray(content))
++                contentArray = content;
++        }
++        else if (entry.type === "custom_message" && Array.isArray(entry.content)) {
++            contentArray = entry.content;
++        }
++        if (!contentArray)
++            continue;
++        for (const block of contentArray) {
++            if (isImageBlock(block) && isBlobRef(block.data)) {
++                block.data = resolveImageData(blobStore, block.data);
++            }
++        }
++    }
++}
+ /** Exported for testing */
+ export function loadEntriesFromFile(filePath) {
+     if (!existsSync(filePath))
+@@ -238,6 +329,7 @@ export function loadEntriesFromFile(filePath) {
+     if (header.type !== "session" || typeof header.id !== "string") {
+         return [];
+     }
++    resolveBlobRefsInEntries(entries, new BlobStore(getBlobsDir()));
+     return entries;
+ }
+ function isValidSessionFile(filePath) {
+@@ -430,6 +522,8 @@ export class SessionManager {
+     sessionDir;
+     cwd;
+     persist;
++    blobStore;
++    artifactManager = null;
+     flushed = false;
+     fileEntries = [];
+     byId = new Map();
+@@ -439,6 +533,7 @@ export class SessionManager {
+         this.cwd = cwd;
+         this.sessionDir = sessionDir;
+         this.persist = persist;
++        this.blobStore = new BlobStore(getBlobsDir());
+         if (persist && sessionDir && !existsSync(sessionDir)) {
+             mkdirSync(sessionDir, { recursive: true });
+         }
+@@ -452,6 +547,7 @@ export class SessionManager {
+     /** Switch to a different session file (used for resume and branching) */
+     setSessionFile(sessionFile) {
+         this.sessionFile = resolve(sessionFile);
++        this.artifactManager = new ArtifactManager(this.sessionFile);
+         if (existsSync(this.sessionFile)) {
+             this.fileEntries = loadEntriesFromFile(this.sessionFile);
+             // If file was empty or corrupted (no valid header), truncate and start fresh
+@@ -497,6 +593,7 @@ export class SessionManager {
+         if (this.persist) {
+             const fileTimestamp = timestamp.replace(/[:.]/g, "-");
+             this.sessionFile = join(this.getSessionDir(), `${fileTimestamp}_${this.sessionId}.jsonl`);
++            this.artifactManager = new ArtifactManager(this.sessionFile);
+         }
+         return this.sessionFile;
+     }
+@@ -522,7 +619,9 @@ export class SessionManager {
+     _rewriteFile() {
+         if (!this.persist || !this.sessionFile)
+             return;
+-        const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
++        const content = `${this.fileEntries
++            .map((entry) => JSON.stringify(prepareForPersistence(entry, this.blobStore)))
++            .join("\n")}\n`;
+         writeFileSync(this.sessionFile, content);
+     }
+     isPersisted() {
+@@ -540,6 +639,9 @@ export class SessionManager {
+     getSessionFile() {
+         return this.sessionFile;
+     }
++    getArtifactManager() {
++        return this.artifactManager;
++    }
+     _persist(entry) {
+         if (!this.persist || !this.sessionFile)
+             return;
+@@ -551,12 +653,12 @@ export class SessionManager {
+         }
+         if (!this.flushed) {
+             for (const e of this.fileEntries) {
+-                appendFileSync(this.sessionFile, `${JSON.stringify(e)}\n`);
++                appendFileSync(this.sessionFile, `${JSON.stringify(prepareForPersistence(e, this.blobStore))}\n`);
+             }
+             this.flushed = true;
+         }
+         else {
+-            appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
++            appendFileSync(this.sessionFile, `${JSON.stringify(prepareForPersistence(entry, this.blobStore))}\n`);
+         }
+     }
+     _appendEntry(entry) {
+@@ -1030,7 +1132,7 @@ export class SessionManager {
+         // Copy all non-header entries from source
+         for (const entry of sourceEntries) {
+             if (entry.type !== "session") {
+-                appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
++                appendFileSync(newSessionFile, `${JSON.stringify(prepareForPersistence(entry, new BlobStore(getBlobsDir())))}\n`);
+             }
+         }
+         return new SessionManager(targetCwd, dir, newSessionFile, true);
 diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/bash.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/bash.js
-index 27fe820..68f277f 100644
+index 27fe820..d6bcc1a 100644
 --- a/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/bash.js
 +++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/bash.js
 @@ -1,11 +1,35 @@
@@ -46,3 +427,133 @@ index 27fe820..68f277f 100644
                  if (timeoutHandle)
                      clearTimeout(timeoutHandle);
                  if (signal)
+@@ -105,6 +130,7 @@ export function createBashTool(cwd, options) {
+     const ops = options?.operations ?? defaultBashOperations;
+     const commandPrefix = options?.commandPrefix;
+     const spawnHook = options?.spawnHook;
++    const artifactManager = options?.artifactManager;
+     return {
+         name: "bash",
+         label: "bash",
+@@ -115,9 +141,10 @@ export function createBashTool(cwd, options) {
+             const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
+             const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook);
+             return new Promise((resolve, reject) => {
+-                // We'll stream to a temp file if output gets large
+-                let tempFilePath;
+-                let tempFileStream;
++                // We'll stream to a file if output gets large
++                let spillFilePath;
++                let spillArtifactId;
++                let spillFileStream;
+                 let totalBytes = 0;
+                 // Keep a rolling buffer of the last chunk for tail truncation
+                 const chunks = [];
+@@ -126,18 +153,23 @@ export function createBashTool(cwd, options) {
+                 const maxChunksBytes = DEFAULT_MAX_BYTES * 2;
+                 const handleData = (data) => {
+                     totalBytes += data.length;
+-                    // Start writing to temp file once we exceed the threshold
+-                    if (totalBytes > DEFAULT_MAX_BYTES && !tempFilePath) {
+-                        tempFilePath = getTempFilePath();
+-                        tempFileStream = createWriteStream(tempFilePath);
+-                        // Write all buffered chunks to the file
++                    // Start writing to file once we exceed the threshold
++                    if (totalBytes > DEFAULT_MAX_BYTES && !spillFilePath) {
++                        if (artifactManager) {
++                            const allocated = artifactManager.allocatePath("bash");
++                            spillFilePath = allocated.path;
++                            spillArtifactId = allocated.id;
++                        }
++                        else {
++                            spillFilePath = getTempFilePath();
++                        }
++                        spillFileStream = createWriteStream(spillFilePath);
+                         for (const chunk of chunks) {
+-                            tempFileStream.write(chunk);
++                            spillFileStream.write(chunk);
+                         }
+                     }
+-                    // Write to temp file if we have one
+-                    if (tempFileStream) {
+-                        tempFileStream.write(data);
++                    if (spillFileStream) {
++                        spillFileStream.write(data);
+                     }
+                     // Keep rolling buffer of recent data
+                     chunks.push(data);
+@@ -156,7 +188,8 @@ export function createBashTool(cwd, options) {
+                             content: [{ type: "text", text: truncation.content || "" }],
+                             details: {
+                                 truncation: truncation.truncated ? truncation : undefined,
+-                                fullOutputPath: tempFilePath,
++                                fullOutputPath: spillFilePath,
++                                ...(spillArtifactId ? { artifactId: spillArtifactId } : {}),
+                             },
+                         });
+                     }
+@@ -168,9 +201,8 @@ export function createBashTool(cwd, options) {
+                     env: spawnContext.env,
+                 })
+                     .then(({ exitCode }) => {
+-                    // Close temp file stream
+-                    if (tempFileStream) {
+-                        tempFileStream.end();
++                    if (spillFileStream) {
++                        spillFileStream.end();
+                     }
+                     // Combine all buffered chunks
+                     const fullBuffer = Buffer.concat(chunks);
+@@ -183,21 +215,22 @@ export function createBashTool(cwd, options) {
+                     if (truncation.truncated) {
+                         details = {
+                             truncation,
+-                            fullOutputPath: tempFilePath,
++                            fullOutputPath: spillFilePath,
++                            ...(spillArtifactId ? { artifactId: spillArtifactId } : {}),
+                         };
+                         // Build actionable notice
+                         const startLine = truncation.totalLines - truncation.outputLines + 1;
+                         const endLine = truncation.totalLines;
++                        const outputRef = spillArtifactId ? `artifact://${spillArtifactId}` : spillFilePath;
+                         if (truncation.lastLinePartial) {
+-                            // Edge case: last line alone > 30KB
+                             const lastLineSize = formatSize(Buffer.byteLength(fullOutput.split("\n").pop() || "", "utf-8"));
+-                            outputText += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${tempFilePath}]`;
++                            outputText += `\n\n[Showing last ${formatSize(truncation.outputBytes)} of line ${endLine} (line is ${lastLineSize}). Full output: ${outputRef}]`;
+                         }
+                         else if (truncation.truncatedBy === "lines") {
+-                            outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${tempFilePath}]`;
++                            outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}. Full output: ${outputRef}]`;
+                         }
+                         else {
+-                            outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${tempFilePath}]`;
++                            outputText += `\n\n[Showing lines ${startLine}-${endLine} of ${truncation.totalLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Full output: ${outputRef}]`;
+                         }
+                     }
+                     if (exitCode !== 0 && exitCode !== null) {
+@@ -209,9 +242,8 @@ export function createBashTool(cwd, options) {
+                     }
+                 })
+                     .catch((err) => {
+-                    // Close temp file stream
+-                    if (tempFileStream) {
+-                        tempFileStream.end();
++                    if (spillFileStream) {
++                        spillFileStream.end();
+                     }
+                     // Combine all buffered chunks for error output
+                     const fullBuffer = Buffer.concat(chunks);
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/index.js b/node_modules/@mariozechner/pi-coding-agent/dist/index.js
+index 50ed291..7784228 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/index.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/index.js
+@@ -21,6 +21,8 @@ createCodingTools, createEditTool, createFindTool, createGrepTool, createLsTool,
+ // Pre-built tools (use process.cwd())
+ readOnlyTools, } from "./core/sdk.js";
+ export { buildSessionContext, CURRENT_SESSION_VERSION, getLatestCompactionEntry, migrateSessionEntries, parseSessionEntries, SessionManager, } from "./core/session-manager.js";
++export { ArtifactManager } from "./core/artifact-manager.js";
++export { BlobStore, externalizeImageData, isBlobRef, parseBlobRef, resolveImageData } from "./core/blob-store.js";
+ export { SettingsManager, } from "./core/settings-manager.js";
+ // Skills
+ export { formatSkillsForPrompt, loadSkills, loadSkillsFromDir, } from "./core/skills.js";

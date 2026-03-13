@@ -29,6 +29,7 @@ const mDir = join(gsd, "milestones", "M001");
 const sDir = join(mDir, "slices", "S01");
 const tDir = join(sDir, "tasks");
 mkdirSync(tDir, { recursive: true });
+mkdirSync(join(gsd, "milestones", "M002"), { recursive: true });
 
 writeFileSync(join(mDir, "M001-ROADMAP.md"), `# M001: Demo Milestone
 
@@ -56,6 +57,11 @@ writeFileSync(join(tDir, "T01-PLAN.md"), `# T01: Implement thing
 - do it
 `);
 
+writeFileSync(join(gsd, "milestones", "M002", "M002-CONTEXT.md"), `# M002: Future Milestone
+
+Not planned yet.
+`);
+
 async function main(): Promise<void> {
   console.log("\n=== workspace index ===");
   {
@@ -63,6 +69,9 @@ async function main(): Promise<void> {
     assertEq(index.active.milestoneId, "M001", "active milestone indexed");
     assertEq(index.active.sliceId, "S01", "active slice indexed");
     assertEq(index.active.taskId, "T01", "active task indexed");
+    assertEq(index.progress.milestones, { done: 0, total: 1 }, "overall milestone progress ignores context-only future milestones");
+    assertEq(index.progress.slices, { done: 0, total: 1 }, "overall slice progress comes from planned roadmaps");
+    assertEq(index.progress.tasks, { done: 0, total: 1 }, "overall task progress comes from task plans");
     assert(index.scopes.some(scope => scope.scope === "M001/S01"), "slice scope listed");
     assert(index.scopes.some(scope => scope.scope === "M001/S01/T01"), "task scope listed");
   }

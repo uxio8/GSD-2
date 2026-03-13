@@ -107,6 +107,15 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
 export async function deriveState(basePath: string): Promise<GSDState> {
   const milestoneIds = findMilestoneIds(basePath);
   const requirements = parseRequirementCounts(await loadFile(resolveGsdRootFile(basePath, "REQUIREMENTS")));
+  const overallProgress = {
+    milestones: { done: 0, total: 0 },
+    slices: { done: 0, total: 0 },
+    tasks: { done: 0, total: 0 },
+  };
+  const withOverallProgress = (progress: NonNullable<GSDState["progress"]>) => ({
+    ...progress,
+    overall: overallProgress,
+  });
 
   if (milestoneIds.length === 0) {
     return {
@@ -119,9 +128,9 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       nextAction: 'No milestones found. Run /gsd to create one.',
       registry: [],
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: { done: 0, total: 0 },
-      },
+      }),
     };
   }
 
@@ -152,10 +161,12 @@ export async function deriveState(basePath: string): Promise<GSDState> {
   for (const mid of milestoneIds) {
     const roadmapFile = resolveMilestoneFile(basePath, mid, "ROADMAP");
     const content = roadmapFile ? await loadFile(roadmapFile) : null;
+    const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
     if (!content) {
       // No roadmap — check if a summary exists (completed milestone without roadmap)
-      const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
       if (summaryFile) {
+        overallProgress.milestones.total++;
+        overallProgress.milestones.done++;
         const summaryContent = await loadFile(summaryFile);
         const summaryTitle = summaryContent
           ? (parseSummary(summaryContent).title || mid)
@@ -175,13 +186,27 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       continue;
     }
 
+    overallProgress.milestones.total++;
+    if (summaryFile) overallProgress.milestones.done++;
+
     const roadmap = parseRoadmap(content);
     const title = roadmap.title.replace(/^M\d+[^:]*:\s*/, '');
     const complete = isMilestoneComplete(roadmap);
 
+    overallProgress.slices.total += roadmap.slices.length;
+    overallProgress.slices.done += roadmap.slices.filter(s => s.done).length;
+
+    for (const slice of roadmap.slices) {
+      const planFile = resolveSliceFile(basePath, mid, slice.id, "PLAN");
+      const planContent = planFile ? await loadFile(planFile) : null;
+      if (!planContent) continue;
+      const plan = parsePlan(planContent);
+      overallProgress.tasks.total += plan.tasks.length;
+      overallProgress.tasks.done += plan.tasks.filter(task => task.done).length;
+    }
+
     if (complete) {
       // All slices done — check if milestone summary exists
-      const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
       if (!summaryFile && !activeMilestoneFound) {
         // All slices complete but no summary written yet → completing-milestone
         activeMilestone = { id: mid, title };
@@ -239,9 +264,9 @@ export async function deriveState(basePath: string): Promise<GSDState> {
         nextAction: 'Resolve milestone dependencies before proceeding.',
         registry,
         requirements,
-        progress: {
+        progress: withOverallProgress({
           milestones: milestoneProgress,
-        },
+        }),
       };
     }
     // All milestones complete
@@ -256,9 +281,9 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       nextAction: 'All milestones complete.',
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
-      },
+      }),
     };
   }
 
@@ -274,9 +299,9 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       nextAction: `Plan milestone ${activeMilestone.id}.`,
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
-      },
+      }),
     };
   }
 
@@ -296,10 +321,10 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       nextAction: `All slices complete in ${activeMilestone.id}. Write milestone summary.`,
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
         slices: sliceProgress,
-      },
+      }),
     };
   }
 
@@ -331,10 +356,10 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       nextAction: 'Resolve dependency blockers or plan next slice.',
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
         slices: sliceProgress,
-      },
+      }),
     };
   }
 
@@ -356,10 +381,10 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       activeBranch: activeBranch ?? undefined,
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
         slices: sliceProgress,
-      },
+      }),
     };
   }
 
@@ -412,11 +437,11 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       activeWorkspace: undefined,
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
         slices: sliceProgress,
         tasks: taskProgress,
-      },
+      }),
     };
   }
 
@@ -433,11 +458,11 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       activeBranch: activeBranch ?? undefined,
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
         slices: sliceProgress,
         tasks: taskProgress,
-      },
+      }),
     };
   }
 
@@ -470,10 +495,10 @@ export async function deriveState(basePath: string): Promise<GSDState> {
     activeBranch: activeBranch ?? undefined,
     registry,
     requirements,
-    progress: {
+    progress: withOverallProgress({
       milestones: milestoneProgress,
       slices: sliceProgress,
       tasks: taskProgress,
-    },
+    }),
   };
 }

@@ -204,6 +204,14 @@ clear_lock_file() {
   ' "${lock_file}"
 }
 
+is_terminal_state_file() {
+  [[ -f "${state_file}" ]] || return 1
+  if grep -Eq '^\*\*Phase:\*\* (complete|blocked)$' "${state_file}"; then
+    return 0
+  fi
+  grep -Eq '^\*\*Next Action:\*\* All milestones complete\.$' "${state_file}"
+}
+
 print_state_summary() {
   echo "project: ${project_name}"
   echo "path: ${project_path}"
@@ -250,6 +258,11 @@ print_state_summary() {
 }
 
 start_runner() {
+  if is_terminal_state_file; then
+    echo "project ${project_name} is already in a terminal state; not starting auto runner"
+    return 0
+  fi
+
   local stale_lock_pid
   stale_lock_pid="$(read_lock_pid || true)"
   if [[ -f "${lock_file}" ]] && { [[ -z "${stale_lock_pid}" ]] || ! is_pid_running "${stale_lock_pid}"; }; then
@@ -277,6 +290,10 @@ start_runner() {
     sleep 1
 
     if ! is_launchctl_running "${label}"; then
+      if is_terminal_state_file; then
+        echo "project ${project_name} reached a terminal state; auto runner exited cleanly"
+        return 0
+      fi
       echo "failed to start auto runner for ${project_name} via launchctl/LaunchAgent" >&2
       exit 1
     fi
@@ -306,6 +323,10 @@ start_runner() {
   sleep 1
 
   if ! is_pid_running "${pid}"; then
+    if is_terminal_state_file; then
+      echo "project ${project_name} reached a terminal state; auto runner exited cleanly"
+      return 0
+    fi
     echo "failed to start auto runner for ${project_name}" >&2
     exit 1
   fi

@@ -9,6 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { isTerminalState, parseStateSnapshot } from "./headless-auto-state.mjs";
 
 const runnerScript = process.argv[2] ? resolve(process.argv[2]) : null;
 const projectPath = process.argv[3] ? resolve(process.argv[3]) : null;
@@ -21,6 +22,7 @@ if (!runnerScript || !projectPath || !logFile || !runtimeDir) {
 }
 
 const lockFile = join(projectPath, ".gsd", "auto.lock");
+const stateFile = join(projectPath, ".gsd", "STATE.md");
 const pidFile = join(runtimeDir, "headless-auto.pid");
 const repoRoot = resolve(dirname(runnerScript), "..");
 const checkIntervalMs = 5000;
@@ -93,6 +95,19 @@ function readLogMtimeMs() {
   } catch {
     return 0;
   }
+}
+
+function readStateSnapshot() {
+  if (!existsSync(stateFile)) return null;
+  try {
+    return parseStateSnapshot(readFileSync(stateFile, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function isTerminalProjectState() {
+  return isTerminalState(readStateSnapshot());
 }
 
 function requestStop(signalName) {
@@ -215,6 +230,11 @@ async function main() {
   let startReason = "initial";
 
   while (!stopRequested) {
+    if (isTerminalProjectState()) {
+      log("terminal-state-detected before-start");
+      break;
+    }
+
     let result = "unknown";
     try {
       const child = startChild(startReason);
@@ -224,6 +244,10 @@ async function main() {
       log(result);
     }
     if (stopRequested || result === "stopped") break;
+    if (isTerminalProjectState()) {
+      log(`terminal-state-detected after-child reason=${result}`);
+      break;
+    }
     startReason = `restart-after-${result}`;
     log(`restart-scheduled reason=${startReason}`);
     await new Promise((resolveDelay) => setTimeout(resolveDelay, restartDelayMs));
