@@ -19,11 +19,12 @@ Start with the inlined context below. Treat the inlined task plan as the authori
 {{priorTaskLines}}
 
 Then:
+0. Narrate step transitions, key implementation decisions, and verification outcomes as you work. Keep it terse — one line between tool-call clusters, not between every call.
 1. If a `GSD Skill Preferences` block is present in system context, use it to decide which skills to load and follow during execution, without relaxing required verification or artifact rules
 2. Execute the steps in the inlined task plan
 3. Build the real thing. If the task plan says "create login endpoint", build an endpoint that actually authenticates against a real store, not one that returns a hardcoded success response. If the task plan says "create dashboard page", build a page that renders real data from the API, not a component with hardcoded props. Stubs and mocks are for tests, not for the shipped feature.
 4. Write or update tests as part of execution — tests are verification, not an afterthought. If the slice plan defines test files in its Verification section and this is the first task, create them (they should initially fail).
-5. When implementing non-trivial runtime behavior, add or preserve agent-usable observability:
+5. When implementing non-trivial runtime behavior (async flows, API boundaries, background processes, error paths), add or preserve agent-usable observability. Skip this for simple changes where it does not apply.
    - Prefer structured logs/events, stable error codes/types, and explicit status surfaces over ad hoc console text
    - Ensure failures are externally inspectable rather than swallowed or hidden
    - Persist high-value failure state when it materially improves retries, recovery, or later debugging
@@ -37,7 +38,7 @@ Then:
    - use `browser_diff` when an action's effect is ambiguous
    - use console/network/dialog diagnostics when validating async, stateful, or failure-prone UI
    - record verification in terms of explicit checks passed/failed, not only prose interpretation
-9. If observability or diagnostics were part of this task's scope, verify them directly — e.g. structured errors, status inspection, health endpoints, persisted failure state, browser/network diagnostics, or equivalent.
+9. If the task plan includes an `Observability Impact` section, verify those signals directly. Skip this step if the task plan omits it.
 10. **If execution is running long or verification fails:**
 
     **Context budget:** If you've used most of your context and haven't finished all steps, stop implementing and prioritize writing the task summary with clear notes on what's done and what remains. A partial summary that enables clean resumption is more valuable than one more half-finished step with no documentation. Never sacrifice summary quality for one more implementation step.
@@ -54,7 +55,7 @@ Then:
 13. Read the template at `~/.gsd/agent/extensions/gsd/templates/task-summary.md`
 14. Write `{{taskSummaryAbsPath}}`
 15. Mark {{taskId}} done in `{{planPath}}` (change `[ ]` to `[x]`)
-16. Commit your work: `git add -A && git commit -m 'feat({{sliceId}}/{{taskId}}): <what was built>'`. If `git add` silently fails to stage files (a known git worktree stat-cache bug), use this workaround per file: `git update-index --cacheinfo 100644,$(git hash-object -w <file>),<file>` then commit. If that also fails, move on — the system will auto-commit remaining changes after your session ends.
+16. Do not commit manually — the system auto-commits your changes after this unit completes.
 17. Update `.gsd/STATE.md`
 
 You are on the slice branch. All work stays here.

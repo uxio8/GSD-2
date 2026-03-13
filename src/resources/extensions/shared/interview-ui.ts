@@ -63,6 +63,14 @@ export interface WrapUpResult {
 	satisfied: boolean;
 }
 
+interface ExpandedTextReader {
+	getExpandedText(): string;
+}
+
+export function getEditorNotesText(editor: ExpandedTextReader): string {
+	return editor.getExpandedText().trim();
+}
+
 // ─── Options ─────────────────────────────────────────────────────────────────
 
 export interface InterviewRoundOptions {
@@ -235,7 +243,7 @@ export async function showInterviewRound(
 		}
 
 		function saveEditorToState() {
-			states[currentIdx].notes = getEditor().getText().trim();
+			states[currentIdx].notes = getEditorNotesText(getEditor());
 		}
 
 		function loadStateToEditor() {

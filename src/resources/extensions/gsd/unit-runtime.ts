@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import {
   gsdRoot,
@@ -97,6 +97,23 @@ export function readUnitRuntimeRecord(basePath: string, unitType: string, unitId
 export function clearUnitRuntimeRecord(basePath: string, unitType: string, unitId: string): void {
   const path = runtimePath(basePath, unitType, unitId);
   if (existsSync(path)) unlinkSync(path);
+}
+
+export function listUnitRuntimeRecords(basePath: string): AutoUnitRuntimeRecord[] {
+  const dir = runtimeDir(basePath);
+  if (!existsSync(dir)) return [];
+
+  const records: AutoUnitRuntimeRecord[] = [];
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith(".json")) continue;
+    try {
+      const raw = readFileSync(join(dir, file), "utf-8");
+      records.push(JSON.parse(raw) as AutoUnitRuntimeRecord);
+    } catch {
+      // Skip malformed runtime records.
+    }
+  }
+  return records;
 }
 
 export async function inspectExecuteTaskDurability(

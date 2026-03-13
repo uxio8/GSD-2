@@ -31,7 +31,7 @@ import {
 } from './paths.ts';
 import { getActiveSliceBranch } from './worktree.ts';
 
-import { readdirSync } from 'fs';
+import { readdirSync, statSync } from 'fs';
 import { join } from 'path';
 
 // ─── Query Functions ───────────────────────────────────────────────────────
@@ -71,6 +71,15 @@ function findMilestoneIds(basePath: string): string[] {
   }
 }
 
+function getFileMtimeMs(path: string | null): number | null {
+  if (!path) return null;
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Returns the ID of the first incomplete milestone, or null if all are complete.
  */
@@ -98,6 +107,15 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
 export async function deriveState(basePath: string): Promise<GSDState> {
   const milestoneIds = findMilestoneIds(basePath);
   const requirements = parseRequirementCounts(await loadFile(resolveGsdRootFile(basePath, "REQUIREMENTS")));
+  const overallProgress = {
+    milestones: { done: 0, total: 0 },
+    slices: { done: 0, total: 0 },
+    tasks: { done: 0, total: 0 },
+  };
+  const withOverallProgress = (progress: NonNullable<GSDState["progress"]>) => ({
+    ...progress,
+    overall: overallProgress,
+  });
 
   if (milestoneIds.length === 0) {
     return {
@@ -110,9 +128,9 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       nextAction: 'No milestones found. Run /gsd to create one.',
       registry: [],
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: { done: 0, total: 0 },
-      },
+      }),
     };
   }
 
@@ -143,10 +161,12 @@ export async function deriveState(basePath: string): Promise<GSDState> {
   for (const mid of milestoneIds) {
     const roadmapFile = resolveMilestoneFile(basePath, mid, "ROADMAP");
     const content = roadmapFile ? await loadFile(roadmapFile) : null;
+    const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
     if (!content) {
       // No roadmap — check if a summary exists (completed milestone without roadmap)
-      const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
       if (summaryFile) {
+        overallProgress.milestones.total++;
+        overallProgress.milestones.done++;
         const summaryContent = await loadFile(summaryFile);
         const summaryTitle = summaryContent
           ? (parseSummary(summaryContent).title || mid)
@@ -166,13 +186,27 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       continue;
     }
 
+    overallProgress.milestones.total++;
+    if (summaryFile) overallProgress.milestones.done++;
+
     const roadmap = parseRoadmap(content);
     const title = roadmap.title.replace(/^M\d+[^:]*:\s*/, '');
     const complete = isMilestoneComplete(roadmap);
 
+    overallProgress.slices.total += roadmap.slices.length;
+    overallProgress.slices.done += roadmap.slices.filter(s => s.done).length;
+
+    for (const slice of roadmap.slices) {
+      const planFile = resolveSliceFile(basePath, mid, slice.id, "PLAN");
+      const planContent = planFile ? await loadFile(planFile) : null;
+      if (!planContent) continue;
+      const plan = parsePlan(planContent);
+      overallProgress.tasks.total += plan.tasks.length;
+      overallProgress.tasks.done += plan.tasks.filter(task => task.done).length;
+    }
+
     if (complete) {
       // All slices done — check if milestone summary exists
-      const summaryFile = resolveMilestoneFile(basePath, mid, "SUMMARY");
       if (!summaryFile && !activeMilestoneFound) {
         // All slices complete but no summary written yet → completing-milestone
         activeMilestone = { id: mid, title };
@@ -230,9 +264,9 @@ export async function deriveState(basePath: string): Promise<GSDState> {
         nextAction: 'Resolve milestone dependencies before proceeding.',
         registry,
         requirements,
-        progress: {
+        progress: withOverallProgress({
           milestones: milestoneProgress,
-        },
+        }),
       };
     }
     // All milestones complete
@@ -247,9 +281,9 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       nextAction: 'All milestones complete.',
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
-      },
+      }),
     };
   }
 
@@ -265,9 +299,9 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       nextAction: `Plan milestone ${activeMilestone.id}.`,
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
-      },
+      }),
     };
   }
 
@@ -287,10 +321,10 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       nextAction: `All slices complete in ${activeMilestone.id}. Write milestone summary.`,
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
         slices: sliceProgress,
-      },
+      }),
     };
   }
 
@@ -322,10 +356,10 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       nextAction: 'Resolve dependency blockers or plan next slice.',
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
         slices: sliceProgress,
-      },
+      }),
     };
   }
 
@@ -347,10 +381,10 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       activeBranch: activeBranch ?? undefined,
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
         slices: sliceProgress,
-      },
+      }),
     };
   }
 
@@ -359,7 +393,57 @@ export async function deriveState(basePath: string): Promise<GSDState> {
     done: slicePlan.tasks.filter(t => t.done).length,
     total: slicePlan.tasks.length,
   };
+  const completedTasks = slicePlan.tasks.filter(t => t.done);
+  let blockerTaskId: string | null = null;
+  let blockerTaskUpdatedAt: number | null = null;
+  for (const ct of completedTasks) {
+    const summaryFile = resolveTaskFile(basePath, activeMilestone.id, activeSlice.id, ct.id, "SUMMARY");
+    if (!summaryFile) continue;
+    const summaryContent = await loadFile(summaryFile);
+    if (!summaryContent) continue;
+    const summary = parseSummary(summaryContent);
+    if (summary.frontmatter.blocker_discovered) {
+      const summaryUpdatedAt = getFileMtimeMs(summaryFile);
+      if (blockerTaskUpdatedAt === null || (summaryUpdatedAt ?? 0) >= blockerTaskUpdatedAt) {
+        blockerTaskId = ct.id;
+        blockerTaskUpdatedAt = summaryUpdatedAt ?? 0;
+      }
+    }
+  }
+  const replanFile = resolveSliceFile(basePath, activeMilestone.id, activeSlice.id, "REPLAN");
+  const replanUpdatedAt = getFileMtimeMs(replanFile);
   const activeTaskEntry = slicePlan.tasks.find(t => !t.done);
+
+  const needsFreshReplan = blockerTaskId !== null && (
+    replanUpdatedAt === null ||
+    (blockerTaskUpdatedAt ?? 0) > replanUpdatedAt
+  );
+
+  if (needsFreshReplan) {
+    return {
+      activeMilestone,
+      activeSlice,
+      activeTask: activeTaskEntry
+        ? {
+            id: activeTaskEntry.id,
+            title: activeTaskEntry.title,
+          }
+        : null,
+      phase: 'replanning-slice',
+      recentDecisions: [],
+      blockers: [`Task ${blockerTaskId} discovered a blocker requiring slice replan`],
+      nextAction: `Task ${blockerTaskId} reported blocker_discovered. Replan slice ${activeSlice.id} before continuing.`,
+      activeBranch: activeBranch ?? undefined,
+      activeWorkspace: undefined,
+      registry,
+      requirements,
+      progress: withOverallProgress({
+        milestones: milestoneProgress,
+        slices: sliceProgress,
+        tasks: taskProgress,
+      }),
+    };
+  }
 
   if (!activeTaskEntry) {
     // All tasks done but slice not marked complete
@@ -374,11 +458,11 @@ export async function deriveState(basePath: string): Promise<GSDState> {
       activeBranch: activeBranch ?? undefined,
       registry,
       requirements,
-      progress: {
+      progress: withOverallProgress({
         milestones: milestoneProgress,
         slices: sliceProgress,
         tasks: taskProgress,
-      },
+      }),
     };
   }
 
@@ -387,47 +471,7 @@ export async function deriveState(basePath: string): Promise<GSDState> {
     title: activeTaskEntry.title,
   };
 
-  // ── Blocker detection: scan completed task summaries ──────────────────
-  // If any completed task has blocker_discovered: true and no REPLAN.md
-  // exists yet, transition to replanning-slice instead of executing.
-  const completedTasks = slicePlan.tasks.filter(t => t.done);
-  let blockerTaskId: string | null = null;
-  for (const ct of completedTasks) {
-    const summaryFile = resolveTaskFile(basePath, activeMilestone.id, activeSlice.id, ct.id, "SUMMARY");
-    if (!summaryFile) continue;
-    const summaryContent = await loadFile(summaryFile);
-    if (!summaryContent) continue;
-    const summary = parseSummary(summaryContent);
-    if (summary.frontmatter.blocker_discovered) {
-      blockerTaskId = ct.id;
-      break;
-    }
-  }
-
   if (blockerTaskId) {
-    // Loop protection: if REPLAN.md already exists, a replan was already
-    // performed for this slice — skip further replanning and continue executing.
-    const replanFile = resolveSliceFile(basePath, activeMilestone.id, activeSlice.id, "REPLAN");
-    if (!replanFile) {
-      return {
-        activeMilestone,
-        activeSlice,
-        activeTask,
-        phase: 'replanning-slice',
-        recentDecisions: [],
-        blockers: [`Task ${blockerTaskId} discovered a blocker requiring slice replan`],
-        nextAction: `Task ${blockerTaskId} reported blocker_discovered. Replan slice ${activeSlice.id} before continuing.`,
-        activeBranch: activeBranch ?? undefined,
-        activeWorkspace: undefined,
-        registry,
-        requirements,
-        progress: {
-          milestones: milestoneProgress,
-          slices: sliceProgress,
-          tasks: taskProgress,
-        },
-      };
-    }
     // REPLAN.md exists — loop protection: fall through to normal executing
   }
 
@@ -451,10 +495,10 @@ export async function deriveState(basePath: string): Promise<GSDState> {
     activeBranch: activeBranch ?? undefined,
     registry,
     requirements,
-    progress: {
+    progress: withOverallProgress({
       milestones: milestoneProgress,
       slices: sliceProgress,
       tasks: taskProgress,
-    },
+    }),
   };
 }

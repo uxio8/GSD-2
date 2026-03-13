@@ -5,13 +5,14 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deriveState } from "./state.js";
 import { GSDDashboardOverlay } from "./dashboard-overlay.js";
 import { showSmartEntry, showQueue, showDiscuss } from "./guided-flow.js";
 import { startAuto, stopAuto, isAutoActive, isAutoPaused } from "./auto.js";
+import { activateWorktree } from "./worktree-command.js";
 import {
   getGlobalGSDPreferencesPath,
   getLegacyGlobalGSDPreferencesPath,
@@ -31,6 +32,7 @@ import {
 } from "./doctor.js";
 import { loadPrompt } from "./prompt-loader.js";
 import { handleMigrate } from "./migrate/command.js";
+import { handleRemote } from "../remote-questions/remote-command.js";
 
 function dispatchDoctorHeal(pi: ExtensionAPI, scope: string | undefined, reportText: string, structuredIssues: string): void {
   const workflowPath = process.env.GSD_WORKFLOW_PATH ?? join(process.env.HOME ?? "~", ".pi", "GSD-WORKFLOW.md");
@@ -52,10 +54,10 @@ function dispatchDoctorHeal(pi: ExtensionAPI, scope: string | undefined, reportT
 
 export function registerGSDCommand(pi: ExtensionAPI): void {
   pi.registerCommand("gsd", {
-    description: "GSD — Get Shit Done: /gsd auto|stop|status|queue|prefs|doctor|migrate",
+    description: "GSD — Get Shit Done: /gsd next|auto|stop|status|queue|discuss|new|prefs|doctor|migrate|remote",
 
     getArgumentCompletions: (prefix: string) => {
-      const subcommands = ["auto", "stop", "status", "queue", "discuss", "prefs", "doctor", "migrate"];
+      const subcommands = ["next", "auto", "stop", "status", "queue", "discuss", "new", "prefs", "doctor", "migrate", "remote"];
       const parts = prefix.trim().split(/\s+/);
 
       if (parts.length <= 1) {
@@ -64,11 +66,11 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
           .map((cmd) => ({ value: cmd, label: cmd }));
       }
 
-      if (parts[0] === "auto" && parts.length <= 2) {
+      if ((parts[0] === "auto" || parts[0] === "next") && parts.length <= 2) {
         const flagPrefix = parts[1] ?? "";
         return ["--verbose"]
           .filter((f) => f.startsWith(flagPrefix))
-          .map((f) => ({ value: `auto ${f}`, label: f }));
+          .map((f) => ({ value: `${parts[0]} ${f}`, label: f }));
       }
 
       if (parts[0] === "prefs" && parts.length <= 2) {
@@ -76,6 +78,13 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
         return ["global", "project", "status"]
           .filter((cmd) => cmd.startsWith(subPrefix))
           .map((cmd) => ({ value: `prefs ${cmd}`, label: cmd }));
+      }
+
+      if (parts[0] === "remote" && parts.length <= 2) {
+        const subPrefix = parts[1] ?? "";
+        return ["slack", "discord", "status", "disconnect"]
+          .filter((cmd) => cmd.startsWith(subPrefix))
+          .map((cmd) => ({ value: `remote ${cmd}`, label: cmd }));
       }
 
       if (parts[0] === "doctor") {
@@ -112,6 +121,12 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
         return;
       }
 
+      if (trimmed === "next" || trimmed.startsWith("next ")) {
+        const verboseMode = trimmed.includes("--verbose");
+        await startAuto(ctx, pi, process.cwd(), verboseMode, { step: true });
+        return;
+      }
+
       if (trimmed === "auto" || trimmed.startsWith("auto ")) {
         const verboseMode = trimmed.includes("--verbose");
         await startAuto(ctx, pi, process.cwd(), verboseMode);
@@ -137,22 +152,74 @@ export function registerGSDCommand(pi: ExtensionAPI): void {
         return;
       }
 
+      if (trimmed === "new" || trimmed.startsWith("new ")) {
+        await handleNewProject(trimmed.replace(/^new\s*/, "").trim(), ctx, pi);
+        return;
+      }
+
       if (trimmed === "migrate" || trimmed.startsWith("migrate ")) {
         await handleMigrate(trimmed.replace(/^migrate\s*/, "").trim(), ctx, pi);
         return;
       }
 
+      if (trimmed === "remote" || trimmed.startsWith("remote ")) {
+        await handleRemote(trimmed.replace(/^remote\s*/, "").trim(), ctx, pi);
+        return;
+      }
+
       if (trimmed === "") {
-        await showSmartEntry(ctx, pi, process.cwd());
+        await startAuto(ctx, pi, process.cwd(), false, { step: true });
         return;
       }
 
       ctx.ui.notify(
-        `Unknown: /gsd ${trimmed}. Use /gsd, /gsd auto, /gsd stop, /gsd status, /gsd queue, /gsd discuss, /gsd prefs [global|project|status], /gsd doctor [audit|fix|heal] [M###/S##], or /gsd migrate <path>.`,
+        `Unknown: /gsd ${trimmed}. Use /gsd, /gsd next, /gsd auto, /gsd stop, /gsd status, /gsd queue, /gsd discuss, /gsd new <name>, /gsd prefs [global|project|status], /gsd doctor [audit|fix|heal] [M###/S##], /gsd migrate <path>, or /gsd remote [slack|discord|status|disconnect].`,
         "warning",
       );
     },
   });
+}
+
+async function handleNewProject(
+  args: string,
+  ctx: ExtensionCommandContext,
+  pi: ExtensionAPI,
+): Promise<void> {
+  const name = args.trim();
+  if (!name) {
+    ctx.ui.notify("Usage: /gsd new <name>", "info");
+    return;
+  }
+
+  if (isAutoActive() || isAutoPaused()) {
+    ctx.ui.notify("`/gsd new` changes this session into a worktree. Run it from another GSD session or stop auto-mode first.", "warning");
+    return;
+  }
+
+  try {
+    const info = activateWorktree(process.cwd(), name, {
+      createIfMissing: true,
+      failIfExists: true,
+    });
+
+    rmSync(join(process.cwd(), ".gsd"), { recursive: true, force: true });
+
+    ctx.ui.notify(
+      [
+        `Isolated project "${name}" ready.`,
+        `  Path:   ${info.path}`,
+        `  Branch: ${info.branch}`,
+        "Existing GSD state was cleared only inside this worktree.",
+        "Launching the normal /gsd new-project flow here.",
+      ].join("\n"),
+      "info",
+    );
+
+    await showSmartEntry(ctx, pi, process.cwd());
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Failed to start isolated project: ${msg}`, "error");
+  }
 }
 
 async function handleStatus(ctx: ExtensionCommandContext): Promise<void> {

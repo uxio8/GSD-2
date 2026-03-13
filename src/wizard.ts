@@ -83,6 +83,9 @@ export function loadStoredEnvKeys(authStorage: AuthStorage): void {
     ['brave_answers', 'BRAVE_ANSWERS_KEY'],
     ['context7',      'CONTEXT7_API_KEY'],
     ['jina',          'JINA_API_KEY'],
+    ['tavily',        'TAVILY_API_KEY'],
+    ['slack_bot',     'SLACK_BOT_TOKEN'],
+    ['discord_bot',   'DISCORD_BOT_TOKEN'],
   ]
   for (const [provider, envVar] of providers) {
     if (!process.env[envVar]) {
@@ -132,6 +135,13 @@ const API_KEYS: ApiKeyConfig[] = [
     label:       'Jina AI',
     hint:        '(clean page extraction)',
     description: 'High-quality web page content extraction',
+  },
+  {
+    provider:    'tavily',
+    envVar:      'TAVILY_API_KEY',
+    label:       'Tavily Search',
+    hint:        '(alternative search backend)',
+    description: 'Alternative web search provider',
   },
 ]
 

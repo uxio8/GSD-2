@@ -12,7 +12,7 @@ import {
 } from "./paths.ts";
 import { deriveState } from "./state.ts";
 import { type ValidationIssue, validateCompleteBoundary, validatePlanBoundary } from "./observability-validator.ts";
-import { getSliceBranchName } from "./worktree.ts";
+import { detectWorktreeName, getSliceBranchName } from "./worktree.ts";
 
 export interface WorkspaceTaskTarget {
   id: string;
@@ -54,6 +54,11 @@ export interface GSDWorkspaceIndex {
     sliceId?: string;
     taskId?: string;
     phase: string;
+  };
+  progress: {
+    milestones: { done: number; total: number };
+    slices: { done: number; total: number };
+    tasks: { done: number; total: number };
   };
   scopes: WorkspaceScopeTarget[];
   validationIssues: ValidationIssue[];
@@ -112,7 +117,7 @@ async function indexSlice(basePath: string, milestoneId: string, sliceId: string
     summaryPath,
     uatPath,
     tasksDir,
-    branch: getSliceBranchName(milestoneId, sliceId),
+    branch: getSliceBranchName(milestoneId, sliceId, detectWorktreeName(basePath)),
     tasks,
   };
 }
@@ -151,6 +156,11 @@ export async function indexWorkspace(basePath: string): Promise<GSDWorkspaceInde
     taskId: state.activeTask?.id,
     phase: state.phase,
   };
+  const progress = state.progress?.overall ?? {
+    milestones: { done: 0, total: 0 },
+    slices: { done: 0, total: 0 },
+    tasks: { done: 0, total: 0 },
+  };
 
   const scopes: WorkspaceScopeTarget[] = [{ scope: "project", label: "project", kind: "project" }];
   for (const milestone of milestones) {
@@ -167,7 +177,7 @@ export async function indexWorkspace(basePath: string): Promise<GSDWorkspaceInde
     }
   }
 
-  return { milestones, active, scopes, validationIssues };
+  return { milestones, active, progress, scopes, validationIssues };
 }
 
 export async function listDoctorScopeSuggestions(basePath: string): Promise<Array<{ value: string; label: string }>> {

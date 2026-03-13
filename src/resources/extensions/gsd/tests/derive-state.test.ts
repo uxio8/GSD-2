@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -55,6 +55,27 @@ function writeMilestoneSummary(base: string, mid: string, content: string): void
   const dir = join(base, '.gsd', 'milestones', mid);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${mid}-SUMMARY.md`), content);
+}
+
+function writeSliceReplan(base: string, mid: string, sid: string, content: string): string {
+  const dir = join(base, '.gsd', 'milestones', mid, 'slices', sid);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${sid}-REPLAN.md`);
+  writeFileSync(file, content);
+  return file;
+}
+
+function writeTaskSummary(base: string, mid: string, sid: string, tid: string, content: string): string {
+  const dir = join(base, '.gsd', 'milestones', mid, 'slices', sid, 'tasks');
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${tid}-SUMMARY.md`);
+  writeFileSync(file, content);
+  return file;
+}
+
+function setMtime(path: string, iso: string): void {
+  const time = new Date(iso);
+  utimesSync(path, time, time);
 }
 
 function writeRequirements(base: string, content: string): void {
@@ -290,6 +311,102 @@ Continue from step 2.
   }
 
   // ─── Test 7: all milestones complete → complete ────────────────────────
+  console.log('\n=== blocker newer than replan → replanning-slice ===');
+  {
+    const base = createFixtureBase();
+    try {
+      writeRoadmap(base, 'M001', `# M001: Test Milestone
+
+**Vision:** Test blocker freshness.
+
+## Slices
+
+- [ ] **S01: Test Slice** \`risk:low\` \`depends:[]\`
+  > After this: Slice is done.
+`);
+
+      writePlan(base, 'M001', 'S01', `# S01: Test Slice
+
+**Goal:** Test blocker freshness.
+**Demo:** Tests pass.
+
+## Tasks
+
+- [x] **T01: First Done** \`est:10m\`
+  Already completed.
+
+- [x] **T02: Second Done** \`est:10m\`
+  Also completed.
+`);
+
+      const replanPath = writeSliceReplan(base, 'M001', 'S01', `# S01 Replan\n`);
+      const blockerSummaryPath = writeTaskSummary(base, 'M001', 'S01', 'T02', `---
+blocker_discovered: true
+---
+
+# T02 Summary
+`);
+      setMtime(replanPath, '2026-03-12T10:00:00Z');
+      setMtime(blockerSummaryPath, '2026-03-12T10:05:00Z');
+
+      const state = await deriveState(base);
+
+      assertEq(state.phase, 'replanning-slice', 'fresh blocker: phase is replanning-slice');
+      assertEq(state.activeTask, null, 'fresh blocker: activeTask is null when all tasks are done');
+      assert(
+        state.nextAction.includes('T02') || state.blockers.some(b => b.includes('T02')),
+        'fresh blocker: nextAction or blockers mention T02'
+      );
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  console.log('\n=== replan newer than blocker → summarizing ===');
+  {
+    const base = createFixtureBase();
+    try {
+      writeRoadmap(base, 'M001', `# M001: Test Milestone
+
+**Vision:** Test replan freshness.
+
+## Slices
+
+- [ ] **S01: Test Slice** \`risk:low\` \`depends:[]\`
+  > After this: Slice is done.
+`);
+
+      writePlan(base, 'M001', 'S01', `# S01: Test Slice
+
+**Goal:** Test replan freshness.
+**Demo:** Tests pass.
+
+## Tasks
+
+- [x] **T01: First Done** \`est:10m\`
+  Already completed.
+`);
+
+      const blockerSummaryPath = writeTaskSummary(base, 'M001', 'S01', 'T01', `---
+blocker_discovered: true
+---
+
+# T01 Summary
+`);
+      const replanPath = writeSliceReplan(base, 'M001', 'S01', `# S01 Replan\n`);
+      setMtime(blockerSummaryPath, '2026-03-12T10:00:00Z');
+      setMtime(replanPath, '2026-03-12T10:05:00Z');
+
+      const state = await deriveState(base);
+
+      assertEq(state.phase, 'summarizing', 'fresh replan: phase is summarizing');
+      assertEq(state.activeTask, null, 'fresh replan: activeTask is null');
+    } finally {
+      cleanup(base);
+    }
+  }
+
+  // ─── Test 9: all milestones complete → complete ────────────────────────
   console.log('\n=== all milestones complete → complete ===');
   {
     const base = createFixtureBase();

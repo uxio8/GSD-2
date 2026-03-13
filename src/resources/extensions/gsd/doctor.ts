@@ -108,6 +108,10 @@ function buildStateMarkdown(state: Awaited<ReturnType<typeof deriveState>>): str
   if (state.requirements) {
     lines.push(`**Requirements Status:** ${state.requirements.active} active · ${state.requirements.validated} validated · ${state.requirements.deferred} deferred · ${state.requirements.outOfScope} out of scope`);
   }
+  if (state.progress?.overall) {
+    const overall = state.progress.overall;
+    lines.push(`**Overall Progress:** ${overall.tasks.done}/${overall.tasks.total} tasks · ${overall.slices.done}/${overall.slices.total} slices · ${overall.milestones.done}/${overall.milestones.total} milestones`);
+  }
   lines.push("");
   lines.push("## Milestone Registry");
 
@@ -145,6 +149,10 @@ async function updateStateFile(basePath: string, fixesApplied: string[]): Promis
   const path = resolveGsdRootFile(basePath, "STATE");
   await saveFile(path, buildStateMarkdown(state));
   fixesApplied.push(`updated ${path}`);
+}
+
+export async function rebuildState(basePath: string): Promise<void> {
+  await updateStateFile(basePath, []);
 }
 
 async function ensureSliceSummaryStub(basePath: string, milestoneId: string, sliceId: string, fixesApplied: string[]): Promise<void> {
@@ -415,10 +423,16 @@ export function formatDoctorIssuesForPrompt(issues: DoctorIssue[]): string {
   }).join("\n");
 }
 
-export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; scope?: string }): Promise<DoctorReport> {
+export type DoctorFixLevel = "all" | "task";
+
+export async function runGSDDoctor(
+  basePath: string,
+  options?: { fix?: boolean; scope?: string; fixLevel?: DoctorFixLevel },
+): Promise<DoctorReport> {
   const issues: DoctorIssue[] = [];
   const fixesApplied: string[] = [];
   const fix = options?.fix === true;
+  const fixLevel = options?.fixLevel ?? "all";
 
   const prefs = loadEffectiveGSDPreferences();
   if (prefs) {
@@ -599,7 +613,9 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
           file: relSliceFile(basePath, milestoneId, slice.id, "SUMMARY"),
           fixable: true,
         });
-        if (fix) await ensureSliceSummaryStub(basePath, milestoneId, slice.id, fixesApplied);
+        if (fix && fixLevel === "all") {
+          await ensureSliceSummaryStub(basePath, milestoneId, slice.id, fixesApplied);
+        }
       }
 
       if (allTasksDone && !hasSliceUat) {
@@ -612,7 +628,9 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
           file: `${relSlicePath(basePath, milestoneId, slice.id)}/${slice.id}-UAT.md`,
           fixable: true,
         });
-        if (fix) await ensureSliceUatStub(basePath, milestoneId, slice.id, fixesApplied);
+        if (fix && fixLevel === "all") {
+          await ensureSliceUatStub(basePath, milestoneId, slice.id, fixesApplied);
+        }
       }
 
       if (allTasksDone && !slice.done) {
@@ -625,7 +643,11 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
           file: relMilestoneFile(basePath, milestoneId, "ROADMAP"),
           fixable: true,
         });
-        if (fix && (hasSliceSummary || issues.some(issue => issue.code === "all_tasks_done_missing_slice_summary" && issue.unitId === unitId))) {
+        if (
+          fix
+          && fixLevel === "all"
+          && (hasSliceSummary || issues.some(issue => issue.code === "all_tasks_done_missing_slice_summary" && issue.unitId === unitId))
+        ) {
           await markSliceDoneInRoadmap(basePath, milestoneId, slice.id, fixesApplied);
         }
       }
@@ -680,4 +702,3 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
     fixesApplied,
   };
 }
-

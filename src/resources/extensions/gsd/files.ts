@@ -4,7 +4,7 @@
 // Pure functions, zero Pi dependencies — uses only Node built-ins.
 
 import { promises as fs, readdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { milestonesDir, resolveMilestoneFile, relMilestoneFile } from './paths.js';
 
 import type {
@@ -13,7 +13,11 @@ import type {
   Summary, SummaryFrontmatter, SummaryRequires, FileModified,
   Continue, ContinueFrontmatter, ContinueStatus,
   RequirementCounts,
+  SecretsManifest, SecretsManifestEntry, SecretsManifestEntryStatus,
+  ManifestStatus,
 } from './types.ts';
+
+import { checkExistingEnvKeys } from '../get-secrets-from-user.ts';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -263,6 +267,70 @@ export function parseRoadmap(content: string): Roadmap {
   return { title, vision, successCriteria, slices, boundaryMap };
 }
 
+// ─── Secrets Manifest Parser ───────────────────────────────────────────────
+
+const VALID_STATUSES = new Set<SecretsManifestEntryStatus>(['pending', 'collected', 'skipped']);
+
+export function parseSecretsManifest(content: string): SecretsManifest {
+  const milestone = extractBoldField(content, 'Milestone') || '';
+  const generatedAt = extractBoldField(content, 'Generated') || '';
+
+  const h3Sections = extractAllSections(content, 3);
+  const entries: SecretsManifestEntry[] = [];
+
+  for (const [heading, sectionContent] of h3Sections) {
+    const key = heading.trim();
+    if (!key) continue;
+
+    const service = extractBoldField(sectionContent, 'Service') || '';
+    const dashboardUrl = extractBoldField(sectionContent, 'Dashboard') || '';
+    const formatHint = extractBoldField(sectionContent, 'Format hint') || '';
+    const rawStatus = (extractBoldField(sectionContent, 'Status') || 'pending')
+      .toLowerCase()
+      .trim() as SecretsManifestEntryStatus;
+    const status = VALID_STATUSES.has(rawStatus) ? rawStatus : 'pending';
+    const destination = extractBoldField(sectionContent, 'Destination') || 'dotenv';
+
+    const guidance: string[] = [];
+    for (const line of sectionContent.split('\n')) {
+      const guidanceMatch = line.match(/^\s*\d+\.\s+(.+)/);
+      if (guidanceMatch) {
+        guidance.push(guidanceMatch[1].trim());
+      }
+    }
+
+    entries.push({ key, service, dashboardUrl, guidance, formatHint, status, destination });
+  }
+
+  return { milestone, generatedAt, entries };
+}
+
+export function formatSecretsManifest(manifest: SecretsManifest): string {
+  const lines: string[] = [];
+
+  lines.push('# Secrets Manifest');
+  lines.push('');
+  lines.push(`**Milestone:** ${manifest.milestone}`);
+  lines.push(`**Generated:** ${manifest.generatedAt}`);
+
+  for (const entry of manifest.entries) {
+    lines.push('');
+    lines.push(`### ${entry.key}`);
+    lines.push('');
+    lines.push(`**Service:** ${entry.service}`);
+    if (entry.dashboardUrl) lines.push(`**Dashboard:** ${entry.dashboardUrl}`);
+    if (entry.formatHint) lines.push(`**Format hint:** ${entry.formatHint}`);
+    lines.push(`**Status:** ${entry.status}`);
+    lines.push(`**Destination:** ${entry.destination}`);
+    lines.push('');
+    for (let i = 0; i < entry.guidance.length; i++) {
+      lines.push(`${i + 1}. ${entry.guidance[i]}`);
+    }
+  }
+
+  return lines.join('\n') + '\n';
+}
+
 // ─── Slice Plan Parser ─────────────────────────────────────────────────────
 
 export function parsePlan(content: string): SlicePlan {
@@ -347,21 +415,23 @@ export function parseSummary(content: string): Summary {
   const [fmLines, body] = splitFrontmatter(content);
 
   const fm = fmLines ? parseFrontmatterMap(fmLines) : {};
+  const asStringArray = (value: unknown): string[] =>
+    Array.isArray(value) ? value as string[] : (typeof value === 'string' && value ? [value] : []);
   const frontmatter: SummaryFrontmatter = {
     id: (fm.id as string) || '',
     parent: (fm.parent as string) || '',
     milestone: (fm.milestone as string) || '',
-    provides: (fm.provides as string[]) || [],
+    provides: asStringArray(fm.provides),
     requires: ((fm.requires as Array<Record<string, string>>) || []).map(r => ({
       slice: r.slice || '',
       provides: r.provides || '',
     })),
-    affects: (fm.affects as string[]) || [],
-    key_files: (fm.key_files as string[]) || [],
-    key_decisions: (fm.key_decisions as string[]) || [],
-    patterns_established: (fm.patterns_established as string[]) || [],
-    drill_down_paths: (fm.drill_down_paths as string[]) || [],
-    observability_surfaces: (fm.observability_surfaces as string[]) || [],
+    affects: asStringArray(fm.affects),
+    key_files: asStringArray(fm.key_files),
+    key_decisions: asStringArray(fm.key_decisions),
+    patterns_established: asStringArray(fm.patterns_established),
+    drill_down_paths: asStringArray(fm.drill_down_paths),
+    observability_surfaces: asStringArray(fm.observability_surfaces),
     duration: (fm.duration as string) || '',
     verification_result: (fm.verification_result as string) || 'untested',
     completed_at: (fm.completed_at as string) || '',
@@ -727,4 +797,39 @@ export async function inlinePriorMilestoneSummary(mid: string, base: string): Pr
   const content = absPath ? await loadFile(absPath) : null;
   if (!content) return null;
   return `### Prior Milestone Summary\nSource: \`${relPath}\`\n\n${content.trim()}`;
+}
+
+// ─── Manifest Status ──────────────────────────────────────────────────────
+
+export async function getManifestStatus(
+  base: string,
+  milestoneId: string,
+): Promise<ManifestStatus | null> {
+  const resolvedPath = resolveMilestoneFile(base, milestoneId, 'SECRETS');
+  if (!resolvedPath) return null;
+
+  const content = await loadFile(resolvedPath);
+  if (!content) return null;
+
+  const manifest = parseSecretsManifest(content);
+  const keys = manifest.entries.map((entry) => entry.key);
+  const existingKeys = await checkExistingEnvKeys(keys, resolve(base, '.env'));
+  const existingSet = new Set(existingKeys);
+
+  const status: ManifestStatus = {
+    pending: [],
+    collected: [],
+    skipped: [],
+    existing: [],
+  };
+
+  for (const entry of manifest.entries) {
+    if (existingSet.has(entry.key)) {
+      status.existing.push(entry.key);
+    } else {
+      status[entry.status].push(entry.key);
+    }
+  }
+
+  return status;
 }

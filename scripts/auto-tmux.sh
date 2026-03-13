@@ -12,7 +12,7 @@ Usage:
 
 What it does:
   - starts a persistent tmux session running the local headless auto runner
-  - stores the session name in .gsd/tmux-auto.session
+  - stores runner metadata under ~/.gsd/runtime/
   - lets you inspect or attach later without depending on this terminal
 EOF
 }
@@ -30,14 +30,17 @@ state_file="${project_path}/.gsd/STATE.md"
 lock_file="${project_path}/.gsd/auto.lock"
 log_file="${project_path}/.gsd/tmux-auto.log"
 headless_log_file="${project_path}/.gsd/auto-run.log"
-pid_file="${project_path}/.gsd/headless-auto.pid"
-session_file="${project_path}/.gsd/tmux-auto.session"
+safe_project_key="$(echo "${project_path}" | tr '/:' '__' | tr -cs '[:alnum:]_-' '_')"
+runtime_dir="${HOME}/.gsd/runtime/${safe_project_key}"
+pid_file="${runtime_dir}/headless-auto.pid"
+session_file="${runtime_dir}/tmux-auto.session"
 derived_state_script="${gsd_root}/scripts/derived-state-summary.mjs"
 derived_state_resolver="${gsd_root}/src/resources/extensions/gsd/tests/resolve-ts.mjs"
 sanitized_name="$(echo "${project_name}" | tr -cs '[:alnum:]' '-' | sed 's/^-*//; s/-*$//')"
 session_name="gsd-auto-${sanitized_name}"
 
 mkdir -p "${project_path}/.gsd"
+mkdir -p "${runtime_dir}"
 echo "${session_name}" > "${session_file}"
 
 has_session() {

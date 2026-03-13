@@ -2,6 +2,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import type { GitPreferences } from "./git-service.ts";
+import { VALID_BRANCH_NAME } from "./git-service.ts";
 
 const GLOBAL_PREFERENCES_PATH = join(homedir(), ".gsd", "preferences.md");
 const LEGACY_GLOBAL_PREFERENCES_PATH = join(homedir(), ".pi", "agent", "gsd-preferences.md");
@@ -15,11 +17,23 @@ export interface GSDSkillRule {
   avoid?: string[];
 }
 
+export interface GSDPhaseModelConfig {
+  model: string;
+  fallbacks?: string[];
+}
+
+export type GSDModelPreference = string | GSDPhaseModelConfig;
+
 export interface GSDModelConfig {
-  research?: string;   // e.g. "claude-sonnet-4-6"
-  planning?: string;   // e.g. "claude-opus-4-6"
-  execution?: string;  // e.g. "claude-sonnet-4-6"
-  completion?: string; // e.g. "claude-sonnet-4-6"
+  research?: GSDModelPreference;
+  planning?: GSDModelPreference;
+  execution?: GSDModelPreference;
+  completion?: GSDModelPreference;
+}
+
+export interface ResolvedModelConfig {
+  primary: string;
+  fallbacks: string[];
 }
 
 export type SkillDiscoveryMode = "auto" | "suggest" | "off";
@@ -29,6 +43,17 @@ export interface AutoSupervisorConfig {
   soft_timeout_minutes?: number;
   idle_timeout_minutes?: number;
   hard_timeout_minutes?: number;
+}
+
+export interface RemoteQuestionsConfig {
+  channel: "slack" | "discord";
+  channel_id: string | number;
+  timeout_minutes?: number;
+  poll_interval_seconds?: number;
+}
+
+export interface GSDSecretsConfig {
+  proactive_collect?: boolean;
 }
 
 export interface GSDPreferences {
@@ -43,6 +68,9 @@ export interface GSDPreferences {
   auto_supervisor?: AutoSupervisorConfig;
   uat_dispatch?: boolean;
   budget_ceiling?: number;
+  remote_questions?: RemoteQuestionsConfig;
+  secrets?: GSDSecretsConfig;
+  git?: GitPreferences;
 }
 
 export interface LoadedGSDPreferences {
@@ -430,7 +458,11 @@ function parseFrontmatterBlock(frontmatter: string): GSDPreferences {
 function parseScalar(value: string): string | number | boolean {
   if (value === "true") return true;
   if (value === "false") return false;
-  if (/^-?\d+$/.test(value)) return Number(value);
+  if (/^-?\d+$/.test(value)) {
+    const n = Number(value);
+    if (Number.isSafeInteger(n)) return n;
+    return value;
+  }
   return value.replace(/^['\"]|['\"]$/g, "");
 }
 
@@ -448,26 +480,46 @@ export function resolveSkillDiscoveryMode(): SkillDiscoveryMode {
  * Returns undefined if no model preference is set for this unit type.
  */
 export function resolveModelForUnit(unitType: string): string | undefined {
+  const resolved = resolveModelWithFallbacksForUnit(unitType);
+  return resolved?.primary;
+}
+
+export function resolveModelWithFallbacksForUnit(unitType: string): ResolvedModelConfig | undefined {
   const prefs = loadEffectiveGSDPreferences();
   if (!prefs?.preferences.models) return undefined;
   const m = prefs.preferences.models;
 
+  let phaseConfig: GSDModelPreference | undefined;
   switch (unitType) {
     case "research-milestone":
     case "research-slice":
-      return m.research;
+      phaseConfig = m.research;
+      break;
     case "plan-milestone":
     case "plan-slice":
     case "replan-slice":
-      return m.planning;
+      phaseConfig = m.planning;
+      break;
     case "execute-task":
-      return m.execution;
+      phaseConfig = m.execution;
+      break;
     case "complete-slice":
     case "run-uat":
-      return m.completion;
+      phaseConfig = m.completion;
+      break;
     default:
       return undefined;
   }
+
+  if (!phaseConfig) return undefined;
+  if (typeof phaseConfig === "string") {
+    return { primary: phaseConfig, fallbacks: [] };
+  }
+
+  return {
+    primary: phaseConfig.model,
+    fallbacks: phaseConfig.fallbacks ?? [],
+  };
 }
 
 export function resolveAutoSupervisorConfig(): AutoSupervisorConfig {
@@ -480,6 +532,11 @@ export function resolveAutoSupervisorConfig(): AutoSupervisorConfig {
     hard_timeout_minutes: configured.hard_timeout_minutes ?? 30,
     ...(configured.model ? { model: configured.model } : {}),
   };
+}
+
+export function resolveProactiveSecretsEnabled(): boolean {
+  const prefs = loadEffectiveGSDPreferences();
+  return prefs?.preferences.secrets?.proactive_collect ?? false;
 }
 
 function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPreferences {
@@ -495,6 +552,15 @@ function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPr
     auto_supervisor: { ...(base.auto_supervisor ?? {}), ...(override.auto_supervisor ?? {}) },
     uat_dispatch: override.uat_dispatch ?? base.uat_dispatch,
     budget_ceiling: override.budget_ceiling ?? base.budget_ceiling,
+    remote_questions: override.remote_questions
+      ? { ...(base.remote_questions ?? {}), ...override.remote_questions }
+      : base.remote_questions,
+    secrets: (base.secrets || override.secrets)
+      ? { ...(base.secrets ?? {}), ...(override.secrets ?? {}) }
+      : undefined,
+    git: (base.git || override.git)
+      ? { ...(base.git ?? {}), ...(override.git ?? {}) }
+      : undefined,
   };
 }
 
@@ -575,6 +641,70 @@ function validatePreferences(preferences: GSDPreferences): {
       validated.budget_ceiling = Number(raw);
     } else {
       errors.push("budget_ceiling must be a finite number");
+    }
+  }
+
+  if (preferences.secrets && typeof preferences.secrets === "object") {
+    const s = preferences.secrets as Record<string, unknown>;
+    const secrets: Record<string, unknown> = {};
+    if (s.proactive_collect !== undefined) {
+      if (typeof s.proactive_collect === "boolean") secrets.proactive_collect = s.proactive_collect;
+      else errors.push("secrets.proactive_collect must be a boolean");
+    }
+    if (Object.keys(secrets).length > 0) {
+      validated.secrets = secrets as GSDSecretsConfig;
+    }
+  }
+
+  if (preferences.git && typeof preferences.git === "object") {
+    const g = preferences.git as Record<string, unknown>;
+    const git: Record<string, unknown> = {};
+
+    if (g.auto_push !== undefined) {
+      if (typeof g.auto_push === "boolean") git.auto_push = g.auto_push;
+      else errors.push("git.auto_push must be a boolean");
+    }
+    if (g.push_branches !== undefined) {
+      if (typeof g.push_branches === "boolean") git.push_branches = g.push_branches;
+      else errors.push("git.push_branches must be a boolean");
+    }
+    if (g.remote !== undefined) {
+      if (typeof g.remote === "string" && g.remote.trim() !== "") git.remote = g.remote.trim();
+      else errors.push("git.remote must be a non-empty string");
+    }
+    if (g.snapshots !== undefined) {
+      if (typeof g.snapshots === "boolean") git.snapshots = g.snapshots;
+      else errors.push("git.snapshots must be a boolean");
+    }
+    if (g.pre_merge_check !== undefined) {
+      if (typeof g.pre_merge_check === "boolean") {
+        git.pre_merge_check = g.pre_merge_check;
+      } else if (typeof g.pre_merge_check === "string" && g.pre_merge_check.trim() !== "") {
+        git.pre_merge_check = g.pre_merge_check.trim();
+      } else {
+        errors.push("git.pre_merge_check must be a boolean or a non-empty string command");
+      }
+    }
+    if (g.commit_type !== undefined) {
+      const validCommitTypes = new Set([
+        "feat", "fix", "refactor", "docs", "test", "chore", "perf", "ci", "build", "style",
+      ]);
+      if (typeof g.commit_type === "string" && validCommitTypes.has(g.commit_type)) {
+        git.commit_type = g.commit_type;
+      } else {
+        errors.push("git.commit_type must be one of: feat, fix, refactor, docs, test, chore, perf, ci, build, style");
+      }
+    }
+    if (g.main_branch !== undefined) {
+      if (typeof g.main_branch === "string" && g.main_branch.trim() !== "" && VALID_BRANCH_NAME.test(g.main_branch)) {
+        git.main_branch = g.main_branch;
+      } else {
+        errors.push("git.main_branch must be a valid branch name (alphanumeric, _, -, /, .)");
+      }
+    }
+
+    if (Object.keys(git).length > 0) {
+      validated.git = git as GitPreferences;
     }
   }
 

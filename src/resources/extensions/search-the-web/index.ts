@@ -38,31 +38,14 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { registerSearchTool } from "./tool-search";
 import { registerFetchPageTool } from "./tool-fetch-page";
 import { registerLLMContextTool } from "./tool-llm-context";
+import { registerSearchProviderCommand } from "./command-search-provider.ts";
+import { registerNativeSearchHooks } from "./native-search.ts";
 
 export default function (pi: ExtensionAPI) {
   // Register all tools
   registerSearchTool(pi);
   registerFetchPageTool(pi);
   registerLLMContextTool(pi);
-
-  // Startup diagnostics
-  pi.on("session_start", async (_event, ctx) => {
-    const hasBrave = !!process.env.BRAVE_API_KEY;
-    const hasJina = !!process.env.JINA_API_KEY;
-    const hasAnswers = !!process.env.BRAVE_ANSWERS_KEY;
-
-    if (!hasBrave) {
-      ctx.ui.notify(
-        "Web search: Set BRAVE_API_KEY for web search + LLM context capability",
-        "warning"
-      );
-    }
-
-    const parts: string[] = ["Web search v3 loaded"];
-    if (hasBrave) parts.push("Search ✓");
-    if (hasAnswers) parts.push("Answers ✓");
-    if (hasJina) parts.push("Jina ✓");
-
-    ctx.ui.notify(parts.join(" · "), "info");
-  });
+  registerSearchProviderCommand(pi);
+  registerNativeSearchHooks(pi);
 }

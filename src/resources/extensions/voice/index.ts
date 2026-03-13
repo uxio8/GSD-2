@@ -1,0 +1,203 @@
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { shortcutDesc } from "../shared/terminal.js";
+import type { AssistantMessage } from "@mariozechner/pi-ai";
+import { isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { spawn, execSync, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as readline from "node:readline";
+import { fileURLToPath } from "node:url";
+
+const extensionDir = path.dirname(fileURLToPath(import.meta.url));
+const SWIFT_SRC = path.join(extensionDir, "speech-recognizer.swift");
+const RECOGNIZER_BIN = path.join(extensionDir, "speech-recognizer");
+
+function ensureBinary(): boolean {
+  if (fs.existsSync(RECOGNIZER_BIN)) return true;
+  try {
+    execSync(`swiftc "${SWIFT_SRC}" -o "${RECOGNIZER_BIN}" -framework Speech -framework AVFoundation`, {
+      timeout: 60000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export default function (pi: ExtensionAPI) {
+  if (process.platform !== "darwin") return;
+
+  let active = false;
+  let recognizerProcess: ChildProcess | null = null;
+  let flashOn = true;
+  let flashTimer: ReturnType<typeof setInterval> | null = null;
+  let footerTui: { requestRender: () => void } | null = null;
+
+  function setVoiceFooter(ctx: ExtensionContext, on: boolean) {
+    if (!on) {
+      stopFlash();
+      ctx.ui.setFooter(undefined);
+      return;
+    }
+
+    flashOn = true;
+    flashTimer = setInterval(() => {
+      flashOn = !flashOn;
+      footerTui?.requestRender();
+    }, 500);
+
+    ctx.ui.setFooter((tui, theme, footerData) => {
+      footerTui = tui;
+      const unsubscribe = footerData.onBranchChange(() => tui.requestRender());
+
+      return {
+        dispose: unsubscribe,
+        invalidate() {},
+        render(width: number): string[] {
+          let pwd = process.cwd();
+          const home = process.env.HOME || process.env.USERPROFILE;
+          if (home && pwd.startsWith(home)) pwd = `~${pwd.slice(home.length)}`;
+          const branch = footerData.getGitBranch();
+          if (branch) pwd = `${pwd} (${branch})`;
+
+          const dot = flashOn ? theme.fg("error", "●") : theme.fg("dim", "●");
+          const voiceTag = `${dot} ${theme.fg("error", "transcribing")}`;
+          const voiceTagWidth = visibleWidth(voiceTag);
+
+          const maxPwdWidth = width - voiceTagWidth - 2;
+          const pwdStr = truncateToWidth(theme.fg("dim", pwd), maxPwdWidth, theme.fg("dim", "..."));
+          const pad1 = " ".repeat(Math.max(1, width - visibleWidth(pwdStr) - voiceTagWidth));
+          const row1 = truncateToWidth(pwdStr + pad1 + voiceTag, width);
+
+          let totalInput = 0;
+          let totalOutput = 0;
+          let totalCost = 0;
+          for (const entry of ctx.sessionManager.getEntries()) {
+            if (entry.type === "message" && entry.message.role === "assistant") {
+              const message = entry.message as AssistantMessage;
+              totalInput += message.usage.input;
+              totalOutput += message.usage.output;
+              totalCost += message.usage.cost.total;
+            }
+          }
+
+          const fmt = (value: number) => (
+            value < 1000 ? `${value}` :
+            value < 10000 ? `${(value / 1000).toFixed(1)}k` :
+            `${Math.round(value / 1000)}k`
+          );
+          const parts: string[] = [];
+          if (totalInput) parts.push(`↑${fmt(totalInput)}`);
+          if (totalOutput) parts.push(`↓${fmt(totalOutput)}`);
+          if (totalCost) parts.push(`$${totalCost.toFixed(3)}`);
+
+          const usage = ctx.getContextUsage();
+          const contextPercent = usage?.percent !== null && usage?.percent !== undefined ? `${usage.percent.toFixed(1)}%` : "?";
+          const contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+          parts.push(`${contextPercent}/${fmt(contextWindow)}`);
+
+          const statsLeft = theme.fg("dim", parts.join(" "));
+          const modelRight = theme.fg("dim", ctx.model?.id || "no-model");
+          const pad2 = " ".repeat(Math.max(2, width - visibleWidth(statsLeft) - visibleWidth(modelRight)));
+          const row2 = truncateToWidth(statsLeft + pad2 + modelRight, width);
+
+          return [row1, row2];
+        },
+      };
+    });
+  }
+
+  function stopFlash() {
+    if (flashTimer) {
+      clearInterval(flashTimer);
+      flashTimer = null;
+    }
+    footerTui = null;
+  }
+
+  async function toggleVoice(ctx: ExtensionContext) {
+    if (active) {
+      killRecognizer();
+      active = false;
+      setVoiceFooter(ctx, false);
+      return;
+    }
+
+    if (!ensureBinary()) {
+      ctx.ui.notify("Voice: failed to compile speech recognizer (need Xcode CLI tools)", "error");
+      return;
+    }
+
+    active = true;
+    setVoiceFooter(ctx, true);
+    await runVoiceSession(ctx);
+  }
+
+  pi.registerCommand("voice", {
+    description: "Toggle voice mode",
+    handler: async (_args, ctx) => toggleVoice(ctx),
+  });
+
+  pi.registerShortcut("ctrl+alt+v", {
+    description: shortcutDesc("Toggle voice mode", "/voice"),
+    handler: async (ctx) => toggleVoice(ctx),
+  });
+
+  function killRecognizer() {
+    if (recognizerProcess) {
+      recognizerProcess.kill("SIGTERM");
+      recognizerProcess = null;
+    }
+  }
+
+  function startRecognizer(
+    onPartial: (text: string) => void,
+    onFinal: (text: string) => void,
+    onError: (msg: string) => void,
+    onReady: () => void,
+  ) {
+    recognizerProcess = spawn(RECOGNIZER_BIN, [], { stdio: ["pipe", "pipe", "pipe"] });
+    const rl = readline.createInterface({ input: recognizerProcess.stdout! });
+    rl.on("line", (line: string) => {
+      if (line === "READY") {
+        onReady();
+        return;
+      }
+      if (line.startsWith("PARTIAL:")) onPartial(line.slice(8));
+      else if (line.startsWith("FINAL:")) onFinal(line.slice(6));
+      else if (line.startsWith("ERROR:")) onError(line.slice(6));
+    });
+    recognizerProcess.on("error", (error) => onError(error.message));
+    recognizerProcess.on("exit", () => {
+      recognizerProcess = null;
+    });
+  }
+
+  async function runVoiceSession(ctx: ExtensionContext): Promise<void> {
+    return new Promise<void>((resolve) => {
+      startRecognizer(
+        (text) => ctx.ui.setEditorText(text),
+        (text) => ctx.ui.setEditorText(text),
+        (msg) => ctx.ui.notify(`Voice: ${msg}`, "error"),
+        () => {},
+      );
+
+      ctx.ui.custom<void>(
+        (_tui, _theme, _kb, done) => ({
+          render(): string[] { return []; },
+          handleInput(data: string) {
+            if (isKeyRelease(data)) return;
+            if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
+              killRecognizer();
+              active = false;
+              setVoiceFooter(ctx, false);
+              done();
+            }
+          },
+          invalidate() {},
+        }),
+        { overlay: true, overlayOptions: { anchor: "bottom-center", width: "100%" } },
+      ).then(() => resolve());
+    });
+  }
+}

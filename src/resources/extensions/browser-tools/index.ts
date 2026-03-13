@@ -31,6 +31,8 @@ import { StringEnum } from "@mariozechner/pi-ai";
 import type { Browser, BrowserContext, Frame, Page } from "playwright";
 import { mkdir, stat, writeFile, copyFile } from "node:fs/promises";
 import path from "node:path";
+import { registerFormTools } from "./forms.js";
+import { registerIntentTools } from "./intent.js";
 import {
 	beginAction,
 	createActionTimeline,
@@ -1554,6 +1556,38 @@ export default function (pi: ExtensionAPI) {
 	// Clean up on exit
 	pi.on("session_shutdown", async () => {
 		await closeBrowser();
+	});
+
+	registerFormTools(pi, {
+		ensureBrowser,
+		getActiveTarget,
+		getActivePageOrNull,
+		captureCompactPageState,
+		beginTrackedAction,
+		finishTrackedAction,
+		settleAfterActionAdaptive,
+		postActionSummary,
+		getRecentErrors,
+		diffCompactStates,
+		formatDiffText,
+		verificationFromChecks,
+		verificationLine,
+		captureErrorScreenshot,
+	});
+
+	registerIntentTools(pi, {
+		ensureBrowser,
+		getActiveTarget,
+		getActivePageOrNull,
+		captureCompactPageState,
+		beginTrackedAction,
+		finishTrackedAction,
+		settleAfterActionAdaptive,
+		postActionSummary,
+		getRecentErrors,
+		diffCompactStates,
+		formatDiffText,
+		captureErrorScreenshot,
 	});
 
 	// -------------------------------------------------------------------------

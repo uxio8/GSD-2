@@ -38,10 +38,24 @@ interface PoolAcquireResponse {
   sessionId: string | null
 }
 
+type PoolCompleteOutcome =
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'timed_out'
+  | 'usage_limited'
+  | 'auth_invalid'
+
+type UsageLimitSignal = {
+  message: string
+  retryAt: Date | null
+}
+
 export interface PreparedCloudPoolSession {
   authStorage: AuthStorage
   poolActive: boolean
   preferredProvider: string | null
+  rotateOnUsageLimit: (message: string) => Promise<boolean>
   cleanup: () => Promise<void>
 }
 
@@ -72,6 +86,72 @@ function parseListEnv(value: string): string[] {
 
 function cloudPoolError(message: string): Error {
   return new Error(`GSD cloud pool: ${message}`)
+}
+
+function parseRetryDelay(message: string, unit: 'second' | 'minute' | 'hour' | 'day'): number | null {
+  const aliases: Record<typeof unit, string> = {
+    second: 'seconds?|secs?|s',
+    minute: 'minutes?|mins?|m',
+    hour: 'hours?|hrs?|h',
+    day: 'days?|d',
+  }
+  const match = message.match(new RegExp(`try again in\\s*~?(\\d+)\\s*(?:${aliases[unit]})\\b`, 'i'))
+  if (!match) return null
+  const amount = Number(match[1])
+  return Number.isFinite(amount) && amount > 0 ? amount : null
+}
+
+function parseRetryClock(message: string, now: Date): Date | null {
+  const match = message.match(/try again at\s+(\d{1,2}):(\d{2})(?:\s*([ap]m))?/i)
+  if (!match) return null
+
+  let hour = Number(match[1])
+  const minute = Number(match[2])
+  const suffix = match[3]?.toLowerCase()
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute < 0 || minute > 59) return null
+
+  if (suffix === 'pm' && hour < 12) hour += 12
+  if (suffix === 'am' && hour === 12) hour = 0
+  if (!suffix && hour > 23) return null
+
+  const retryAt = new Date(now)
+  retryAt.setSeconds(0, 0)
+  retryAt.setHours(hour, minute, 0, 0)
+  if (retryAt.getTime() <= now.getTime()) {
+    retryAt.setDate(retryAt.getDate() + 1)
+  }
+  return retryAt
+}
+
+export function parseUsageLimitSignal(message: string, now = new Date()): UsageLimitSignal | null {
+  const trimmed = trimString(message)
+  if (!trimmed) return null
+
+  const normalized = trimmed.toLowerCase()
+  const looksLikeUsageLimit =
+    normalized.includes('chatgpt usage limit') ||
+    normalized.includes('hit your usage limit') ||
+    normalized.includes("you've hit your usage limit")
+
+  if (!looksLikeUsageLimit) return null
+
+  const minutes = parseRetryDelay(trimmed, 'minute')
+  const hours = minutes == null ? parseRetryDelay(trimmed, 'hour') : null
+  const days = minutes == null && hours == null ? parseRetryDelay(trimmed, 'day') : null
+  const seconds =
+    minutes == null && hours == null && days == null ? parseRetryDelay(trimmed, 'second') : null
+
+  let retryAt: Date | null = null
+  if (minutes != null) retryAt = new Date(now.getTime() + minutes * 60_000)
+  else if (hours != null) retryAt = new Date(now.getTime() + hours * 60 * 60_000)
+  else if (days != null) retryAt = new Date(now.getTime() + days * 24 * 60 * 60_000)
+  else if (seconds != null) retryAt = new Date(now.getTime() + seconds * 1_000)
+  else retryAt = parseRetryClock(trimmed, now)
+
+  return {
+    message: trimmed,
+    retryAt,
+  }
 }
 
 function unquoteEnvValue(value: string): string {
@@ -377,6 +457,26 @@ async function releaseLease(config: PoolConfig, leaseId: string, reason: string)
   })
 }
 
+async function completeLease(
+  config: PoolConfig,
+  leaseId: string,
+  input: {
+    outcome: PoolCompleteOutcome
+    message?: string
+    usageLimitRetryAt?: Date | null
+  },
+): Promise<void> {
+  await poolRequest(config, {
+    path: `/v1/leases/${encodeURIComponent(leaseId)}/complete`,
+    method: 'POST',
+    body: {
+      outcome: input.outcome,
+      ...(input.message ? { message: input.message } : {}),
+      ...(input.usageLimitRetryAt ? { usageLimitRetryAt: input.usageLimitRetryAt } : {}),
+    },
+  })
+}
+
 export async function prepareCloudPoolSession(
   cwd: string,
   authPath: string,
@@ -387,73 +487,144 @@ export async function prepareCloudPoolSession(
       authStorage: AuthStorage.create(authPath),
       poolActive: false,
       preferredProvider: null,
+      rotateOnUsageLimit: async () => false,
       cleanup: async () => {},
     }
   }
 
-  const acquireBody: JsonRecord = {
-    clientInstanceId: config.clientInstanceId,
-    consumerType: config.consumerType,
-    consumerId: config.consumerId,
-    leaseTtlSec: config.leaseTtlSec,
-  }
-  if (config.pinnedSessionId) acquireBody.pinnedSessionId = config.pinnedSessionId
-  if (config.excludedSessionIds.length > 0) {
-    acquireBody.excludedSessionIds = config.excludedSessionIds
-  }
-
-  const lease = parseAcquireResponse(
-    (
-      await poolRequest(config, {
-        path: `/v1/pools/${encodeURIComponent(config.poolId)}/leases/acquire`,
-        method: 'POST',
-        body: acquireBody,
-      })
-    ).body,
-  )
-
-  let renewTimer: NodeJS.Timeout | null = null
-  let cleanedUp = false
-
-  const cleanup = async () => {
-    if (cleanedUp) return
-    cleanedUp = true
-    if (renewTimer) {
-      clearInterval(renewTimer)
-      renewTimer = null
+  const buildAcquireBody = (): JsonRecord => {
+    const acquireBody: JsonRecord = {
+      clientInstanceId: config.clientInstanceId,
+      consumerType: config.consumerType,
+      consumerId: config.consumerId,
+      leaseTtlSec: config.leaseTtlSec,
     }
-    await releaseLease(config, lease.leaseId, 'gsd_exit').catch(() => {})
+    if (config.pinnedSessionId) acquireBody.pinnedSessionId = config.pinnedSessionId
+    if (config.excludedSessionIds.length > 0) {
+      acquireBody.excludedSessionIds = config.excludedSessionIds
+    }
+    return acquireBody
   }
 
-  try {
+  const acquireLease = async (): Promise<PoolAcquireResponse> =>
+    parseAcquireResponse(
+      (
+        await poolRequest(config, {
+          path: `/v1/pools/${encodeURIComponent(config.poolId)}/leases/acquire`,
+          method: 'POST',
+          body: buildAcquireBody(),
+        })
+      ).body,
+    )
+
+  const readLeaseCredential = async (leaseId: string): Promise<OpenAICodexCredential> => {
     const snapshotResponse = await poolRequest(config, {
-      path: `/v1/leases/${encodeURIComponent(lease.leaseId)}/auth-snapshot`,
+      path: `/v1/leases/${encodeURIComponent(leaseId)}/auth-snapshot`,
       parseAs: 'text',
     })
     const snapshotText =
       typeof snapshotResponse.body === 'string'
         ? snapshotResponse.body
         : JSON.stringify(snapshotResponse.body)
-    const leasedCredential = buildPiOpenAICodexCredential(JSON.parse(snapshotText))
+    return buildPiOpenAICodexCredential(JSON.parse(snapshotText))
+  }
 
+  let currentLease: PoolAcquireResponse | null = await acquireLease()
+  let initialCredential: OpenAICodexCredential
+  try {
+    initialCredential = await readLeaseCredential(currentLease.leaseId)
+  } catch (error) {
+    await releaseLease(config, currentLease.leaseId, 'gsd_auth_snapshot_failed').catch(() => {})
+    throw error
+  }
+
+  const authStorage = createCloudPoolAuthStorage(authPath, initialCredential)
+  let renewTimer: NodeJS.Timeout | null = null
+  let cleanedUp = false
+  let rotationPromise: Promise<boolean> | null = null
+
+  const stopRenewTimer = () => {
+    if (renewTimer) {
+      clearInterval(renewTimer)
+      renewTimer = null
+    }
+  }
+
+  const startRenewTimer = () => {
+    stopRenewTimer()
     renewTimer = setInterval(() => {
+      const leaseId = currentLease?.leaseId
+      if (!leaseId) return
       void poolRequest(config, {
-        path: `/v1/leases/${encodeURIComponent(lease.leaseId)}/renew`,
+        path: `/v1/leases/${encodeURIComponent(leaseId)}/renew`,
         method: 'POST',
       }).catch((error) => {
         const message = error instanceof Error ? error.message : String(error)
         process.stderr.write(`[gsd] Cloud pool renew failed: ${message}\n`)
       })
     }, Math.max(1_000, Math.floor((config.leaseTtlSec * 1_000) / 3)))
+  }
 
-    return {
-      authStorage: createCloudPoolAuthStorage(authPath, leasedCredential),
-      poolActive: true,
-      preferredProvider: 'openai-codex',
-      cleanup,
+  const rotateOnUsageLimit = async (message: string): Promise<boolean> => {
+    const signal = parseUsageLimitSignal(message)
+    if (!signal || cleanedUp) return false
+    if (rotationPromise) return rotationPromise
+
+    rotationPromise = (async () => {
+      const exhaustedLease = currentLease
+      if (!exhaustedLease) return false
+
+      stopRenewTimer()
+      try {
+        await completeLease(config, exhaustedLease.leaseId, {
+          outcome: 'usage_limited',
+          message: signal.message,
+          usageLimitRetryAt: signal.retryAt,
+        })
+      } catch (error) {
+        currentLease = exhaustedLease
+        startRenewTimer()
+        throw error
+      }
+
+      currentLease = null
+      if (exhaustedLease.sessionId) {
+        config.excludedSessionIds = Array.from(
+          new Set([...config.excludedSessionIds, exhaustedLease.sessionId]),
+        )
+      }
+
+      const nextLease = await acquireLease()
+      const nextCredential = await readLeaseCredential(nextLease.leaseId)
+      currentLease = nextLease
+      authStorage.set('openai-codex', nextCredential)
+      startRenewTimer()
+      return true
+    })().finally(() => {
+      rotationPromise = null
+    })
+
+    return rotationPromise
+  }
+
+  const cleanup = async () => {
+    if (cleanedUp) return
+    cleanedUp = true
+    await rotationPromise?.catch(() => {})
+    stopRenewTimer()
+    const leaseId = currentLease?.leaseId
+    currentLease = null
+    if (leaseId) {
+      await releaseLease(config, leaseId, 'gsd_exit').catch(() => {})
     }
-  } catch (error) {
-    await cleanup()
-    throw error
+  }
+
+  startRenewTimer()
+  return {
+    authStorage,
+    poolActive: true,
+    preferredProvider: 'openai-codex',
+    rotateOnUsageLimit,
+    cleanup,
   }
 }

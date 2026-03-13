@@ -373,6 +373,33 @@ console.log('\n=== deriveState: completed task with no summary file → executin
   rmSync(base, { recursive: true, force: true });
 }
 
+// (f) all tasks done + blocker found + no REPLAN.md → replanning-slice
+console.log('\n=== deriveState: all tasks done, blocker found, no REPLAN → replanning-slice ===');
+{
+  const base = createFixtureBase();
+  writeRoadmap(base, 'M001', ROADMAP_ONE_SLICE);
+  writePlan(base, 'M001', 'S01', `# S01: Test Slice
+
+**Goal:** Do things.
+**Demo:** It works.
+
+## Tasks
+
+- [x] **T01: First task** \`est:15m\`
+  First task description.
+
+- [x] **T02: Second task** \`est:15m\`
+  Second task description.
+`);
+  writeTaskSummary(base, 'M001', 'S01', 'T02', makeTaskSummary('T02', true));
+
+  const state = await deriveState(base);
+  assertEq(state.phase, 'replanning-slice', 'phase is replanning-slice when all tasks are done but blocker found');
+  assertEq(state.activeTask, null, 'activeTask is null when blocker is discovered during slice closure');
+  assert(state.nextAction.includes('T02'), 'nextAction mentions blocker task T02');
+  rmSync(base, { recursive: true, force: true });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Prompt: replan-slice template loading and substitution
 // ═══════════════════════════════════════════════════════════════════════════

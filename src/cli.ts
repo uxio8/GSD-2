@@ -1,77 +1,78 @@
 import {
-  DefaultResourceLoader,
-  ModelRegistry,
-  SettingsManager,
-  SessionManager,
-  createAgentSession,
+  AuthStorage,
   InteractiveMode,
+  ModelRegistry,
+  SessionManager,
+  SettingsManager,
+  createAgentSession,
   runPrintMode,
+  runRpcMode,
 } from '@mariozechner/pi-coding-agent'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { agentDir, sessionsDir, authFilePath } from './app-paths.js'
+import { agentDir, authFilePath } from './app-paths.js'
+import { createProjectSessionManager, formatCliHelp, getInteractiveCliError, parseCliArgs } from './cli-support.js'
 import { prepareCloudPoolSession } from './cloud-pool.js'
+import { getPiDefaultModelAndProvider, migratePiCredentials } from './pi-migration.js'
+import { loadProjectOptionalEnvKeys } from './project-env.js'
 import { buildResourceLoader, initResources } from './resource-loader.js'
 import { ensureManagedTools } from './tool-bootstrap.js'
 import { loadStoredEnvKeys, runWizardIfNeeded } from './wizard.js'
+import { runOnboarding, shouldRunOnboarding } from './onboarding.js'
 
-// ---------------------------------------------------------------------------
-// Minimal CLI arg parser — detects print/subagent mode flags
-// ---------------------------------------------------------------------------
-interface CliFlags {
-  mode?: 'text' | 'json' | 'rpc'
-  print?: boolean
-  noSession?: boolean
-  model?: string
-  extensions: string[]
-  appendSystemPrompt?: string
-  tools?: string[]
-  messages: string[]
-}
-
-function parseCliArgs(argv: string[]): CliFlags {
-  const flags: CliFlags = { extensions: [], messages: [] }
-  const args = argv.slice(2)
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]
-    if (arg === '--mode' && i + 1 < args.length) {
-      const mode = args[++i]
-      if (mode === 'text' || mode === 'json' || mode === 'rpc') flags.mode = mode
-    } else if (arg === '--print' || arg === '-p') {
-      flags.print = true
-    } else if (arg === '--no-session') {
-      flags.noSession = true
-    } else if (arg === '--model' && i + 1 < args.length) {
-      flags.model = args[++i]
-    } else if (arg === '--extension' && i + 1 < args.length) {
-      flags.extensions.push(args[++i])
-    } else if (arg === '--append-system-prompt' && i + 1 < args.length) {
-      flags.appendSystemPrompt = args[++i]
-    } else if (arg === '--tools' && i + 1 < args.length) {
-      flags.tools = args[++i].split(',')
-    } else if (!arg.startsWith('--') && !arg.startsWith('-')) {
-      flags.messages.push(arg)
-    }
+function loadAppendSystemPrompt(pathOrText: string | undefined): string | undefined {
+  if (!pathOrText) return undefined
+  try {
+    return readFileSync(pathOrText, 'utf-8')
+  } catch {
+    return pathOrText
   }
-  return flags
 }
 
-const cwd = process.cwd()
 const cliFlags = parseCliArgs(process.argv)
+
+if (cliFlags.version) {
+  process.stdout.write(`${process.env.GSD_VERSION || '0.0.0'}\n`)
+  process.exit(0)
+}
+
+if (cliFlags.help) {
+  process.stdout.write(formatCliHelp(process.env.GSD_VERSION || '0.0.0'))
+  process.exit(0)
+}
+
 const isPrintMode = cliFlags.print || cliFlags.mode !== undefined
+const interactiveCliError = getInteractiveCliError(isPrintMode, !!process.stdin.isTTY)
+
+if (interactiveCliError) {
+  process.stderr.write(`${interactiveCliError}\n`)
+  process.exit(1)
+}
+
+if (!isPrintMode && cliFlags.messages[0] === 'config') {
+  await runOnboarding(AuthStorage.create(authFilePath))
+  process.exit(0)
+}
 
 // Pi's tool bootstrap can mis-detect already-installed fd/rg on some systems
 // because spawnSync(..., ["--version"]) returns EPERM despite a zero exit code.
 // Provision local managed binaries first so Pi sees them without probing PATH.
 ensureManagedTools(join(agentDir, 'bin'))
 
+const cwd = process.cwd()
+loadProjectOptionalEnvKeys(cwd)
 const cloudPoolSession = await prepareCloudPoolSession(cwd, authFilePath)
 const authStorage = cloudPoolSession.authStorage
+migratePiCredentials(authStorage)
 loadStoredEnvKeys(authStorage)
 
-// Skip the setup wizard in print mode — it requires TTY interaction
+// Print/subagent mode has no TTY, so the setup wizard must stay disabled there.
 if (!isPrintMode) {
-  await runWizardIfNeeded(authStorage)
+  if (shouldRunOnboarding(authStorage)) {
+    await runOnboarding(authStorage)
+  } else {
+    await runWizardIfNeeded(authStorage)
+  }
 }
 
 const modelRegistry = new ModelRegistry(authStorage)
@@ -85,13 +86,9 @@ const configuredProvider = settingsManager.getDefaultProvider()
 const configuredModel = settingsManager.getDefaultModel()
 const allModels = modelRegistry.getAll()
 const availableModels = modelRegistry.getAvailable()
-const configuredExists =
-  configuredProvider &&
-  configuredModel &&
+const configuredExists = configuredProvider && configuredModel &&
   allModels.some((m) => m.provider === configuredProvider && m.id === configuredModel)
-const configuredAvailable =
-  configuredProvider &&
-  configuredModel &&
+const configuredAvailable = configuredProvider && configuredModel &&
   availableModels.some((m) => m.provider === configuredProvider && m.id === configuredModel)
 
 if (cloudPoolSession.poolActive && !configuredAvailable) {
@@ -105,57 +102,50 @@ if (cloudPoolSession.poolActive && !configuredAvailable) {
 
 const effectiveProvider = settingsManager.getDefaultProvider()
 const effectiveModel = settingsManager.getDefaultModel()
-const effectiveExists =
-  effectiveProvider &&
-  effectiveModel &&
+const effectiveExists = effectiveProvider && effectiveModel &&
   allModels.some((m) => m.provider === effectiveProvider && m.id === effectiveModel)
+const effectiveAvailable = effectiveProvider && effectiveModel &&
+  availableModels.some((m) => m.provider === effectiveProvider && m.id === effectiveModel)
 
-if (!effectiveModel || !effectiveExists) {
-  // Fallback: pick the best available Anthropic model
+if (!effectiveModel || !effectiveExists || !effectiveAvailable) {
+  const piDefault = cloudPoolSession.poolActive ? null : getPiDefaultModelAndProvider()
   const preferred =
-    allModels.find((m) => m.provider === 'anthropic' && m.id === 'claude-opus-4-6') ||
-    allModels.find((m) => m.provider === 'anthropic' && m.id.includes('opus')) ||
-    allModels.find((m) => m.provider === 'anthropic')
+    (piDefault
+      ? availableModels.find((m) => m.provider === piDefault.provider && m.id === piDefault.model)
+      : undefined) ||
+    availableModels.find((m) => m.provider === 'openai' && m.id === 'gpt-5.4') ||
+    availableModels.find((m) => m.provider === 'openai') ||
+    availableModels.find((m) => m.provider === 'anthropic' && m.id === 'claude-opus-4-6') ||
+    availableModels.find((m) => m.provider === 'anthropic' && m.id.includes('opus')) ||
+    availableModels.find((m) => m.provider === 'anthropic') ||
+    availableModels[0]
   if (preferred) {
     settingsManager.setDefaultModelAndProvider(preferred.provider, preferred.id)
   }
 }
 
-// Default thinking level: off (always reset if not explicitly set)
-if (settingsManager.getDefaultThinkingLevel() !== 'off' && !effectiveExists) {
+if (settingsManager.getDefaultThinkingLevel() !== 'off' && (!effectiveExists || !effectiveAvailable)) {
   settingsManager.setDefaultThinkingLevel('off')
 }
 
-// GSD always uses quiet startup — the gsd extension renders its own branded header
 if (!settingsManager.getQuietStartup()) {
   settingsManager.setQuietStartup(true)
 }
 
-// Collapse changelog by default — avoid wall of text on updates
 if (!settingsManager.getCollapseChangelog()) {
   settingsManager.setCollapseChangelog(true)
 }
 
-try {
+initResources(agentDir)
+
+async function runCli(): Promise<void> {
   if (isPrintMode) {
     const sessionManager = cliFlags.noSession
       ? SessionManager.inMemory()
-      : SessionManager.create(cwd)
-
-    let appendSystemPrompt: string | undefined
-    if (cliFlags.appendSystemPrompt) {
-      try {
-        appendSystemPrompt = readFileSync(cliFlags.appendSystemPrompt, 'utf-8')
-      } catch {
-        appendSystemPrompt = cliFlags.appendSystemPrompt
-      }
-    }
-
-    initResources(agentDir)
-    const resourceLoader = new DefaultResourceLoader({
-      agentDir,
-      additionalExtensionPaths: cliFlags.extensions.length > 0 ? cliFlags.extensions : undefined,
-      appendSystemPrompt,
+      : createProjectSessionManager(cwd)
+    const resourceLoader = buildResourceLoader(agentDir, {
+      additionalExtensionPaths: cliFlags.extensions,
+      appendSystemPrompt: loadAppendSystemPrompt(cliFlags.appendSystemPrompt),
     })
     await resourceLoader.reload()
 
@@ -183,79 +173,78 @@ try {
     }
 
     const mode = cliFlags.mode || 'text'
-    await runPrintMode(session, {
-      mode: mode === 'rpc' ? 'json' : mode,
-      messages: cliFlags.messages,
-    })
-  } else {
-    // Per-directory session storage — same encoding as the upstream SDK so that
-    // /resume only shows sessions from the current working directory.
-    const safePath = `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
-    const projectSessionsDir = join(sessionsDir, safePath)
-    const sessionManager = SessionManager.create(cwd, projectSessionsDir)
-
-    initResources(agentDir)
-    const resourceLoader = buildResourceLoader(agentDir)
-    await resourceLoader.reload()
-
-    const { session, extensionsResult } = await createAgentSession({
-      authStorage,
-      modelRegistry,
-      settingsManager,
-      sessionManager,
-      resourceLoader,
-    })
-
-    if (extensionsResult.errors.length > 0) {
-      for (const err of extensionsResult.errors) {
-        process.stderr.write(`[gsd] Extension load error: ${err.error}\n`)
-      }
+    if (mode === 'rpc') {
+      await runRpcMode(session)
+      return
     }
 
-    // Restore scoped models from settings on startup.
-    // The upstream InteractiveMode reads enabledModels from settings when /scoped-models is opened,
-    // but doesn't apply them to the session at startup — so Ctrl+P cycles all models instead of
-    // just the saved selection until the user re-runs /scoped-models.
-    const enabledModelPatterns = settingsManager.getEnabledModels()
-    if (enabledModelPatterns && enabledModelPatterns.length > 0) {
-      const scopedModels: Array<{ model: (typeof availableModels)[number] }> = []
-      const seen = new Set<string>()
+    await runPrintMode(session, { mode, messages: cliFlags.messages })
+    return
+  }
 
-      for (const pattern of enabledModelPatterns) {
-        const slashIdx = pattern.indexOf('/')
-        if (slashIdx !== -1) {
-          const provider = pattern.substring(0, slashIdx)
-          const modelId = pattern.substring(slashIdx + 1)
-          const model = availableModels.find(
-            (candidate) => candidate.provider === provider && candidate.id === modelId,
-          )
-          if (model) {
-            const key = `${model.provider}/${model.id}`
-            if (!seen.has(key)) {
-              seen.add(key)
-              scopedModels.push({ model })
-            }
+  const sessionManager = createProjectSessionManager(cwd, { continueRecent: cliFlags.continue })
+  const resourceLoader = buildResourceLoader(agentDir)
+  await resourceLoader.reload()
+
+  const { session, extensionsResult } = await createAgentSession({
+    authStorage,
+    modelRegistry,
+    settingsManager,
+    sessionManager,
+    resourceLoader,
+  })
+
+  if (extensionsResult.errors.length > 0) {
+    for (const err of extensionsResult.errors) {
+      process.stderr.write(`[gsd] Extension load error: ${err.error}\n`)
+    }
+  }
+
+  // Restore scoped models from settings on startup.
+  // The upstream InteractiveMode reads enabledModels from settings when /scoped-models is opened,
+  // but doesn't apply them to the session at startup — so Ctrl+P cycles all models instead of
+  // just the saved selection until the user re-runs /scoped-models.
+  const enabledModelPatterns = settingsManager.getEnabledModels()
+  if (enabledModelPatterns && enabledModelPatterns.length > 0) {
+    const scopedModels: Array<{ model: (typeof availableModels)[number] }> = []
+    const seen = new Set<string>()
+
+    for (const pattern of enabledModelPatterns) {
+      const slashIdx = pattern.indexOf('/')
+      if (slashIdx !== -1) {
+        const provider = pattern.substring(0, slashIdx)
+        const modelId = pattern.substring(slashIdx + 1)
+        const model = availableModels.find((m) => m.provider === provider && m.id === modelId)
+        if (model) {
+          const key = `${model.provider}/${model.id}`
+          if (!seen.has(key)) {
+            seen.add(key)
+            scopedModels.push({ model })
           }
-        } else {
-          const model = availableModels.find((candidate) => candidate.id === pattern)
-          if (model) {
-            const key = `${model.provider}/${model.id}`
-            if (!seen.has(key)) {
-              seen.add(key)
-              scopedModels.push({ model })
-            }
+        }
+      } else {
+        const model = availableModels.find((m) => m.id === pattern)
+        if (model) {
+          const key = `${model.provider}/${model.id}`
+          if (!seen.has(key)) {
+            seen.add(key)
+            scopedModels.push({ model })
           }
         }
       }
-
-      if (scopedModels.length > 0 && scopedModels.length < availableModels.length) {
-        session.setScopedModels(scopedModels)
-      }
     }
 
-    const interactiveMode = new InteractiveMode(session)
-    await interactiveMode.run()
+    if (scopedModels.length > 0 && scopedModels.length < availableModels.length) {
+      session.setScopedModels(scopedModels)
+    }
   }
+
+  const interactiveMode = new InteractiveMode(session)
+  await interactiveMode.run()
+}
+
+try {
+  await runCli()
 } finally {
   await cloudPoolSession.cleanup()
 }

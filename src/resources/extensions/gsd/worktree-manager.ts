@@ -16,7 +16,7 @@
  */
 
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { join, relative, resolve } from "node:path";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -26,6 +26,12 @@ export interface WorktreeInfo {
   path: string;
   branch: string;
   exists: boolean;
+}
+
+export interface FileLineStat {
+  file: string;
+  added: number;
+  removed: number;
 }
 
 export interface WorktreeDiffSummary {
@@ -41,7 +47,7 @@ export interface WorktreeDiffSummary {
 
 function runGit(cwd: string, args: string[], opts: { allowFailure?: boolean } = {}): string {
   try {
-    return execSync(`git ${args.join(" ")}`, {
+    return execFileSync("git", args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       encoding: "utf-8",
@@ -109,6 +115,16 @@ export function createWorktree(basePath: string, name: string): WorktreeInfo {
   const mainBranch = getMainBranch(basePath);
 
   if (branchExists) {
+    const worktreeUsing = runGit(basePath, ["worktree", "list", "--porcelain"], { allowFailure: true });
+    const branchInUse = worktreeUsing.includes(`branch refs/heads/${branch}`);
+
+    if (branchInUse) {
+      throw new Error(
+        `Branch "${branch}" is already in use by another worktree. ` +
+        `Remove the existing worktree first with /worktree remove ${name}.`,
+      );
+    }
+
     // Reset the stale branch to current main, then attach worktree to it
     runGit(basePath, ["branch", "-f", branch, mainBranch]);
     runGit(basePath, ["worktree", "add", wtPath, branch]);
@@ -212,19 +228,16 @@ export function removeWorktree(
   }
 }
 
-/**
- * Diff the .gsd/ directory between the worktree branch and main branch.
- * Returns a summary of added, modified, and removed GSD artifacts.
- */
-export function diffWorktreeGSD(basePath: string, name: string): WorktreeDiffSummary {
-  const branch = worktreeBranchName(name);
-  const mainBranch = getMainBranch(basePath);
+const SKIP_PATHS = [".gsd/worktrees/", ".gsd/runtime/", ".gsd/activity/"];
+const SKIP_EXACT = [".gsd/STATE.md", ".gsd/auto.lock", ".gsd/metrics.json"];
 
-  // Use git diff to compare .gsd/ between branches
-  const diffOutput = runGit(basePath, [
-    "diff", "--name-status", `${mainBranch}...${branch}`, "--", ".gsd/",
-  ], { allowFailure: true });
+function shouldSkipPath(filePath: string): boolean {
+  if (SKIP_PATHS.some((prefix) => filePath.startsWith(prefix))) return true;
+  if (SKIP_EXACT.includes(filePath)) return true;
+  return false;
+}
 
+function parseDiffNameStatus(diffOutput: string): WorktreeDiffSummary {
   const added: string[] = [];
   const modified: string[] = [];
   const removed: string[] = [];
@@ -234,19 +247,13 @@ export function diffWorktreeGSD(basePath: string, name: string): WorktreeDiffSum
   for (const line of diffOutput.split("\n").filter(Boolean)) {
     const [status, ...pathParts] = line.split("\t");
     const filePath = pathParts.join("\t");
-
-    // Skip worktree-internal paths (e.g. .gsd/worktrees/, .gsd/runtime/)
-    if (filePath.startsWith(".gsd/worktrees/") || filePath.startsWith(".gsd/runtime/")) continue;
-    // Skip gitignored runtime files
-    if (filePath === ".gsd/STATE.md" || filePath === ".gsd/auto.lock" || filePath === ".gsd/metrics.json") continue;
-    if (filePath.startsWith(".gsd/activity/")) continue;
+    if (shouldSkipPath(filePath)) continue;
 
     switch (status) {
       case "A": added.push(filePath); break;
       case "M": modified.push(filePath); break;
       case "D": removed.push(filePath); break;
       default:
-        // Renames, copies — treat as modified
         if (status?.startsWith("R") || status?.startsWith("C")) {
           modified.push(filePath);
         }
@@ -254,6 +261,54 @@ export function diffWorktreeGSD(basePath: string, name: string): WorktreeDiffSum
   }
 
   return { added, modified, removed };
+}
+
+/**
+ * Diff the .gsd/ directory between the worktree branch and main branch.
+ * Returns a summary of added, modified, and removed GSD artifacts.
+ */
+export function diffWorktreeGSD(basePath: string, name: string): WorktreeDiffSummary {
+  const branch = worktreeBranchName(name);
+  const mainBranch = getMainBranch(basePath);
+
+  const diffOutput = runGit(basePath, [
+    "diff", "--name-status", `${mainBranch}...${branch}`, "--", ".gsd/",
+  ], { allowFailure: true });
+
+  return parseDiffNameStatus(diffOutput);
+}
+
+export function diffWorktreeAll(basePath: string, name: string): WorktreeDiffSummary {
+  const branch = worktreeBranchName(name);
+  const mainBranch = getMainBranch(basePath);
+
+  const diffOutput = runGit(basePath, [
+    "diff", "--name-status", mainBranch, branch,
+  ], { allowFailure: true });
+
+  return parseDiffNameStatus(diffOutput);
+}
+
+export function diffWorktreeNumstat(basePath: string, name: string): FileLineStat[] {
+  const branch = worktreeBranchName(name);
+  const mainBranch = getMainBranch(basePath);
+
+  const raw = runGit(basePath, [
+    "diff", "--numstat", mainBranch, branch,
+  ], { allowFailure: true });
+
+  if (!raw.trim()) return [];
+
+  const stats: FileLineStat[] = [];
+  for (const line of raw.split("\n").filter(Boolean)) {
+    const [a, r, ...pathParts] = line.split("\t");
+    const file = pathParts.join("\t");
+    if (shouldSkipPath(file)) continue;
+    const added = a === "-" ? 0 : parseInt(a ?? "0", 10);
+    const removed = r === "-" ? 0 : parseInt(r ?? "0", 10);
+    stats.push({ file, added, removed });
+  }
+  return stats;
 }
 
 /**
@@ -266,6 +321,15 @@ export function getWorktreeGSDDiff(basePath: string, name: string): string {
 
   return runGit(basePath, [
     "diff", `${mainBranch}...${branch}`, "--", ".gsd/",
+  ], { allowFailure: true });
+}
+
+export function getWorktreeCodeDiff(basePath: string, name: string): string {
+  const branch = worktreeBranchName(name);
+  const mainBranch = getMainBranch(basePath);
+
+  return runGit(basePath, [
+    "diff", `${mainBranch}...${branch}`, "--", ".", ":(exclude).gsd/",
   ], { allowFailure: true });
 }
 

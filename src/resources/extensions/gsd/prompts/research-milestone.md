@@ -6,6 +6,8 @@ All relevant context has been preloaded below — start working immediately with
 
 {{inlinedContext}}
 
+Narrate the important findings as they emerge — what looks risky, what must be proven first, and what constraints the existing codebase imposes.
+
 Then research the codebase and relevant technologies:
 1. If a `GSD Skill Preferences` block is present in system context, use it to decide which skills to load and follow during research, without relaxing required verification or artifact rules
 2. **Skill Discovery ({{skillDiscoveryMode}}):**{{skillDiscoveryInstructions}}
