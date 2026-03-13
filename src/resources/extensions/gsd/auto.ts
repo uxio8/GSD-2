@@ -14,11 +14,21 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ExtensionCommandContext,
+  Model,
 } from "@mariozechner/pi-coding-agent";
 
 import { deriveState } from "./state.js";
 import type { GSDState } from "./types.js";
-import { loadFile, parseContinue, parsePlan, parseRoadmap, parseSummary, extractUatType, inlinePriorMilestoneSummary } from "./files.js";
+import {
+  loadFile,
+  parseContinue,
+  parsePlan,
+  parseRoadmap,
+  parseSummary,
+  extractUatType,
+  getManifestStatus,
+  inlinePriorMilestoneSummary,
+} from "./files.js";
 export { inlinePriorMilestoneSummary };
 import type { UatType } from "./files.js";
 import { loadPrompt } from "./prompt-loader.js";
@@ -40,7 +50,13 @@ import {
   readUnitRuntimeRecord,
   writeUnitRuntimeRecord,
 } from "./unit-runtime.js";
-import { resolveAutoSupervisorConfig, resolveModelForUnit, resolveSkillDiscoveryMode, loadEffectiveGSDPreferences } from "./preferences.js";
+import {
+  resolveAutoSupervisorConfig,
+  resolveModelWithFallbacksForUnit,
+  resolveProactiveSecretsEnabled,
+  resolveSkillDiscoveryMode,
+  loadEffectiveGSDPreferences,
+} from "./preferences.js";
 import type { GSDPreferences } from "./preferences.js";
 import {
   validatePlanBoundary,
@@ -56,7 +72,7 @@ import {
   getProjectTotals, formatCost, formatTokenCount,
 } from "./metrics.js";
 import { join } from "node:path";
-import { readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync, execSync } from "node:child_process";
 import {
   autoCommitCurrentBranch,
@@ -70,6 +86,7 @@ import {
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { makeUI, GLYPH, INDENT } from "../shared/ui.js";
 import { showNextAction } from "../shared/next-action-ui.js";
+import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
 
 function completedKeysPath(base: string): string {
   return join(base, ".gsd", "completed-units.json");
@@ -102,6 +119,19 @@ function loadPersistedKeys(base: string, target: Set<string>): void {
   }
 }
 
+function removePersistedKey(base: string, key: string): void {
+  const file = completedKeysPath(base);
+  try {
+    if (!existsSync(file)) return;
+    const keys: string[] = JSON.parse(readFileSync(file, "utf-8"));
+    const filtered = keys.filter((entry) => entry !== key);
+    if (filtered.length === keys.length) return;
+    writeFileSync(file, JSON.stringify(filtered), "utf-8");
+  } catch {
+    // Non-fatal.
+  }
+}
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let active = false;
@@ -128,12 +158,25 @@ let currentUnit: { type: string; id: string; startedAt: number } | null = null;
 let currentMilestoneId: string | null = null;
 
 /** Model the user had selected before auto-mode started */
-let originalModelId: string | null = null;
+let originalModel: { provider: string; id: string } | null = null;
+let reuseCurrentSessionForNextDispatch = false;
 
 /** Progress-aware timeout supervision */
 let unitTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
 let wrapupWarningHandle: ReturnType<typeof setTimeout> | null = null;
 let idleWatchdogHandle: ReturnType<typeof setInterval> | null = null;
+let dispatchInProgress = false;
+let dispatchQueued = false;
+
+function traceHeadlessAuto(message: string): void {
+  const traceFile = process.env.GSD_HEADLESS_TRACE_FILE;
+  if (!traceFile) return;
+  try {
+    appendFileSync(traceFile, `[${new Date().toISOString()}] extension ${message}\n`, "utf8");
+  } catch {
+    // Non-fatal tracing only.
+  }
+}
 
 function formatWidgetTokens(count: number): string {
   if (count < 1000) return count.toString();
@@ -238,16 +281,19 @@ export async function stopAuto(ctx?: ExtensionContext, pi?: ExtensionAPI): Promi
   currentMilestoneId = null;
   cachedSliceProgress = null;
   pendingCrashRecovery = null;
+  reuseCurrentSessionForNextDispatch = false;
+  dispatchInProgress = false;
+  dispatchQueued = false;
   ctx?.ui.setStatus("gsd-auto", undefined);
   ctx?.ui.setWidget("gsd-progress", undefined);
   ctx?.ui.setFooter(undefined);
 
   // Restore the user's original model
-  if (pi && ctx && originalModelId) {
-    const original = ctx.modelRegistry.find("anthropic", originalModelId);
+  if (pi && ctx && originalModel) {
+    const original = ctx.modelRegistry.find(originalModel.provider, originalModel.id);
     if (original) await pi.setModel(original);
-    originalModelId = null;
   }
+  originalModel = null;
 
   cmdCtx = null;
 }
@@ -264,7 +310,7 @@ export async function pauseAuto(ctx?: ExtensionContext, _pi?: ExtensionAPI): Pro
   active = false;
   paused = true;
   // Preserve: dispatch/recovery bookkeeping, currentUnit, basePath, verbose,
-  // cmdCtx, completedUnits, autoStartTime, currentMilestoneId, originalModelId
+  // cmdCtx, completedUnits, autoStartTime, currentMilestoneId, originalModel
   // — all needed for resume and dashboard display
   ctx?.ui.setStatus("gsd-auto", "paused");
   ctx?.ui.setWidget("gsd-progress", undefined);
@@ -295,6 +341,81 @@ async function selfHealRuntimeRecords(base: string, ctx: ExtensionContext): Prom
   }
 }
 
+function findConfiguredModel(allModels: Model[], modelId: string): Model | undefined {
+  return allModels.find((model) => `${model.provider}/${model.id}` === modelId)
+    ?? allModels.find((model) => model.id === modelId);
+}
+
+export async function applyPreferredModelForUnit(
+  ctx: Pick<ExtensionContext, "modelRegistry" | "ui">,
+  pi: Pick<ExtensionAPI, "setModel">,
+  unitType: string,
+): Promise<void> {
+  const modelConfig = resolveModelWithFallbacksForUnit(unitType);
+  if (!modelConfig) return;
+
+  const allModels = ctx.modelRegistry.getAll();
+  const modelsToTry = [modelConfig.primary, ...modelConfig.fallbacks];
+  const attemptedModels: string[] = [];
+
+  for (let i = 0; i < modelsToTry.length; i++) {
+    const modelId = modelsToTry[i];
+    attemptedModels.push(modelId);
+    const model = findConfiguredModel(allModels, modelId);
+    if (!model) {
+      ctx.ui.notify(`Model ${modelId} not found in registry, trying fallback.`, "warning");
+      continue;
+    }
+
+    const ok = await pi.setModel(model, { persist: false });
+    if (ok) {
+      const fallbackNote = modelId === modelConfig.primary
+        ? ""
+        : ` (fallback from ${modelConfig.primary})`;
+      ctx.ui.notify(`Model: ${modelId}${fallbackNote}`, "info");
+      return;
+    }
+
+    const nextModel = modelsToTry[i + 1];
+    if (nextModel) {
+      ctx.ui.notify(`Failed to set model ${modelId}, trying fallback ${nextModel}...`, "warning");
+    }
+  }
+
+  throw new Error(
+    `Could not set any preferred model for ${unitType}. Tried: ${attemptedModels.join(", ")}`,
+  );
+}
+
+export async function maybeCollectProactiveSecrets(
+  base: string,
+  milestoneId: string,
+  ctx: Pick<ExtensionContext, "ui" | "hasUI">,
+  pi?: Pick<ExtensionAPI, "exec">,
+): Promise<{ applied: string[]; skipped: string[]; existingSkipped: string[]; errors: string[] } | null> {
+  if (!resolveProactiveSecretsEnabled()) return null;
+
+  const manifestStatus = await getManifestStatus(base, milestoneId);
+  if (!manifestStatus || manifestStatus.pending.length === 0) return null;
+
+  const result = await collectSecretsFromManifest(base, milestoneId, ctx, {
+    cwd: base,
+    exec: pi ? (cmd, args) => pi.exec(cmd, args) : undefined,
+  });
+
+  const summary = [
+    `Secrets collected: ${result.applied.length} applied`,
+    `${result.skipped.length} skipped`,
+    `${result.existingSkipped.length} already set`,
+  ];
+  if (result.errors.length > 0) {
+    summary.push(`${result.errors.length} errors`);
+  }
+
+  ctx.ui.notify(summary.join(", ") + ".", result.errors.length > 0 ? "warning" : "info");
+  return result;
+}
+
 export async function startAuto(
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,
@@ -303,6 +424,7 @@ export async function startAuto(
   options?: { step?: boolean },
 ): Promise<void> {
   const requestedStepMode = options?.step ?? false;
+  traceHeadlessAuto(`startAuto enter paused=${paused} step=${requestedStepMode} base=${base}`);
 
   // If resuming from paused state, just re-activate and dispatch next unit.
   // The conversation is still intact — no need to reinitialize everything.
@@ -334,6 +456,7 @@ export async function startAuto(
       // Non-fatal.
     }
     await selfHealRuntimeRecords(base, ctx);
+    traceHeadlessAuto("startAuto resume dispatchNextUnit");
     await dispatchNextUnit(ctx, pi);
     return;
   }
@@ -386,6 +509,7 @@ export async function startAuto(
   }
 
   const state = await deriveState(base);
+  traceHeadlessAuto(`startAuto derived phase=${state.phase} milestone=${state.activeMilestone?.id ?? "none"} slice=${state.activeSlice?.id ?? "none"} task=${state.activeTask?.id ?? "none"}`);
 
   // No active work at all — start a new milestone via the discuss flow.
   if (!state.activeMilestone || state.phase === "complete") {
@@ -413,6 +537,7 @@ export async function startAuto(
   verbose = verboseMode;
   cmdCtx = ctx;
   basePath = base;
+  reuseCurrentSessionForNextDispatch = process.env.GSD_HEADLESS_REUSE_INITIAL_SESSION === "1";
   unitDispatchCount.clear();
   unitRecoveryCount.clear();
   completedKeySet.clear();
@@ -421,7 +546,7 @@ export async function startAuto(
   completedUnits = [];
   currentUnit = null;
   currentMilestoneId = state.activeMilestone?.id ?? null;
-  originalModelId = ctx.model?.id ?? null;
+  originalModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null;
 
   // Initialize metrics — loads existing ledger from disk
   initMetrics(base);
@@ -440,9 +565,22 @@ export async function startAuto(
     : "Will loop until milestone complete.";
   ctx.ui.notify(`${modeLabel} started. ${scopeMsg}`, "info");
 
+  if (state.activeMilestone?.id) {
+    try {
+      await maybeCollectProactiveSecrets(base, state.activeMilestone.id, ctx, pi);
+    } catch (error) {
+      ctx.ui.notify(
+        `Secrets collection error: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
+  }
+
   await selfHealRuntimeRecords(base, ctx);
+  traceHeadlessAuto(`startAuto prepared reuseCurrentSession=${reuseCurrentSessionForNextDispatch}`);
 
   // Dispatch the first unit
+  traceHeadlessAuto("startAuto initial dispatchNextUnit");
   await dispatchNextUnit(ctx, pi);
 }
 
@@ -914,9 +1052,46 @@ async function dispatchNextUnit(
   ctx: ExtensionContext,
   pi: ExtensionAPI,
 ): Promise<void> {
-  if (!active || !cmdCtx) return;
+  if (dispatchInProgress) {
+    dispatchQueued = true;
+    traceHeadlessAuto(`dispatchNextUnit reentry-queued current=${currentUnit?.type ?? "none"}/${currentUnit?.id ?? "none"}`);
+    return;
+  }
 
-  let state = await deriveState(basePath);
+  dispatchInProgress = true;
+  try {
+    do {
+      dispatchQueued = false;
+      try {
+        await dispatchNextUnitInner(ctx, pi);
+      } catch (error) {
+        traceHeadlessAuto(`dispatchNextUnit error ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+        throw error;
+      }
+    } while (dispatchQueued && active && cmdCtx);
+  } finally {
+    dispatchInProgress = false;
+  }
+}
+
+async function dispatchNextUnitInner(
+  ctx: ExtensionContext,
+  pi: ExtensionAPI,
+): Promise<void> {
+  traceHeadlessAuto(`dispatchNextUnit enter current=${currentUnit?.type ?? "none"}/${currentUnit?.id ?? "none"}`);
+  if (!active || !cmdCtx) {
+    traceHeadlessAuto(`dispatchNextUnit early-return inactive=${active} cmdCtx=${cmdCtx ? "set" : "null"}`);
+    return;
+  }
+
+  let state: GSDState;
+  try {
+    state = await deriveState(basePath);
+  } catch (error) {
+    traceHeadlessAuto(`dispatchNextUnit deriveState-error ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  }
+  traceHeadlessAuto(`dispatchNextUnit derived phase=${state.phase} milestone=${state.activeMilestone?.id ?? "none"} slice=${state.activeSlice?.id ?? "none"} task=${state.activeTask?.id ?? "none"}`);
   let mid = state.activeMilestone?.id;
   let midTitle = state.activeMilestone?.title;
 
@@ -932,6 +1107,7 @@ async function dispatchNextUnit(
   if (mid) currentMilestoneId = mid;
 
   if (!mid) {
+    traceHeadlessAuto("dispatchNextUnit no-active-milestone");
     // Save final session before stopping
     if (currentUnit) {
       const modelId = ctx.model?.id ?? "unknown";
@@ -1026,6 +1202,7 @@ async function dispatchNextUnit(
   let prompt: string;
 
   if (state.phase === "complete") {
+    traceHeadlessAuto("dispatchNextUnit phase-complete");
     if (currentUnit) {
       const modelId = ctx.model?.id ?? "unknown";
       snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
@@ -1043,6 +1220,7 @@ async function dispatchNextUnit(
   }
 
   if (state.phase === "blocked") {
+    traceHeadlessAuto(`dispatchNextUnit phase-blocked blockers=${state.blockers.join("|")}`);
     if (currentUnit) {
       const modelId = ctx.model?.id ?? "unknown";
       snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
@@ -1165,6 +1343,7 @@ async function dispatchNextUnit(
       unitId = mid;
       prompt = await buildCompleteMilestonePrompt(mid, midTitle!, basePath);
     } else {
+      traceHeadlessAuto(`dispatchNextUnit unexpected-phase ${state.phase}`);
       if (currentUnit) {
         const modelId = ctx.model?.id ?? "unknown";
         snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
@@ -1180,13 +1359,28 @@ async function dispatchNextUnit(
 
   const idempotencyKey = `${unitType}/${unitId}`;
   if (completedKeySet.has(idempotencyKey)) {
-    ctx.ui.notify(
-      `Skipping ${unitType} ${unitId} — already completed in a prior session. Advancing.`,
-      "info",
-    );
-    await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
-    await dispatchNextUnit(ctx, pi);
-    return;
+    let durableOnDisk = true;
+    if (unitType === "execute-task") {
+      const status = await inspectExecuteTaskDurability(basePath, unitId);
+      durableOnDisk = !!status && status.summaryExists && status.taskChecked;
+    } else {
+      const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
+      durableOnDisk = artifactPath ? existsSync(artifactPath) : true;
+    }
+
+    if (!durableOnDisk) {
+      completedKeySet.delete(idempotencyKey);
+      removePersistedKey(basePath, idempotencyKey);
+      traceHeadlessAuto(`dispatchNextUnit cleared-stale-completed-key unit=${unitType}/${unitId}`);
+    } else {
+      ctx.ui.notify(
+        `Skipping ${unitType} ${unitId} — already completed in a prior session. Advancing.`,
+        "info",
+      );
+      await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+      await dispatchNextUnit(ctx, pi);
+      return;
+    }
   }
 
   const dispatchKey = `${unitType}/${unitId}`;
@@ -1236,6 +1430,7 @@ async function dispatchNextUnit(
   }
 
   currentUnit = { type: unitType, id: unitId, startedAt: Date.now() };
+  traceHeadlessAuto(`dispatchNextUnit selected unit=${unitType}/${unitId}`);
   writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
     phase: "dispatched",
     wrapupWarningSent: false,
@@ -1253,13 +1448,23 @@ async function dispatchNextUnit(
   // Ensure preconditions — create directories, branches, etc.
   // so the LLM doesn't have to get these right
   ensurePreconditions(unitType, unitId, basePath, state);
+  traceHeadlessAuto(`dispatchNextUnit preconditions-ready unit=${unitType}/${unitId}`);
 
-  // Fresh session
-  const result = await cmdCtx!.newSession();
-  if (result.cancelled) {
-    await stopAuto(ctx, pi);
-    ctx.ui.notify("New session cancelled — auto-mode stopped.", "warning");
-    return;
+  // Headless auto-mode already starts from a fresh control session. Reuse it
+  // for the first unit to avoid an immediate nested newSession() before the
+  // first dispatch writes its lock and prompt.
+  if (reuseCurrentSessionForNextDispatch) {
+    traceHeadlessAuto(`dispatchNextUnit reuse-current-session unit=${unitType}/${unitId}`);
+    reuseCurrentSessionForNextDispatch = false;
+  } else {
+    traceHeadlessAuto(`dispatchNextUnit newSession start unit=${unitType}/${unitId}`);
+    const result = await cmdCtx!.newSession();
+    traceHeadlessAuto(`dispatchNextUnit newSession complete unit=${unitType}/${unitId} cancelled=${result.cancelled}`);
+    if (result.cancelled) {
+      await stopAuto(ctx, pi);
+      ctx.ui.notify("New session cancelled — auto-mode stopped.", "warning");
+      return;
+    }
   }
 
   // NOTE: Slice merge happens AFTER the complete-slice unit finishes,
@@ -1271,6 +1476,7 @@ async function dispatchNextUnit(
   // session file survives with every tool call up to the crash point.
   const sessionFile = ctx.sessionManager.getSessionFile();
   writeLock(basePath, unitType, unitId, completedUnits.length, sessionFile);
+  traceHeadlessAuto(`dispatchNextUnit lock-written unit=${unitType}/${unitId}`);
 
   // On crash recovery, prepend the full recovery briefing
   // On retry (stuck detection), prepend deep diagnostic from last attempt
@@ -1285,19 +1491,7 @@ async function dispatchNextUnit(
     }
   }
 
-  // Switch model if preferences specify one for this unit type
-  const preferredModelId = resolveModelForUnit(unitType);
-  if (preferredModelId) {
-    // Try to find the model across all providers
-    const allModels = ctx.modelRegistry.getAll();
-    const model = allModels.find(m => m.id === preferredModelId);
-    if (model) {
-      const ok = await pi.setModel(model, { persist: false });
-      if (ok) {
-        ctx.ui.notify(`Model: ${preferredModelId}`, "info");
-      }
-    }
-  }
+  await applyPreferredModelForUnit(ctx, pi, unitType);
 
   // Start progress-aware supervision: a soft warning, an idle watchdog, and
   // a larger hard ceiling. Productive long-running tasks may continue past the
@@ -1386,6 +1580,7 @@ async function dispatchNextUnit(
     { customType: "gsd-auto", content: finalPrompt, display: verbose },
     { triggerTurn: true },
   );
+  traceHeadlessAuto(`dispatchNextUnit prompt-sent unit=${unitType}/${unitId}`);
 
   // For non-artifact-driven UAT types, pause auto-mode after sending the prompt.
   // The agent will write the UAT result file surfacing it for human review,
@@ -1561,6 +1756,7 @@ async function buildPlanMilestonePrompt(mid: string, midTitle: string, base: str
   const inlinedContext = `## Inlined Context (preloaded — do not re-read these files)\n\n${inlined.join("\n\n---\n\n")}`;
 
   const outputRelPath = relMilestoneFile(base, mid, "ROADMAP");
+  const secretsOutputPath = relMilestoneFile(base, mid, "SECRETS");
   const outputAbsPath = resolveMilestoneFile(base, mid, "ROADMAP") ?? join(base, outputRelPath);
   return loadPrompt("plan-milestone", {
     milestoneId: mid, milestoneTitle: midTitle,
@@ -1568,6 +1764,7 @@ async function buildPlanMilestonePrompt(mid: string, midTitle: string, base: str
     contextPath: contextRel,
     researchPath: researchRel,
     outputPath: outputRelPath,
+    secretsOutputPath,
     outputAbsPath,
     inlinedContext,
   });

@@ -58,6 +58,7 @@ lock_file="${project_path}/.gsd/auto.lock"
 derived_state_script="${gsd_root}/scripts/derived-state-summary.mjs"
 derived_state_resolver="${gsd_root}/src/resources/extensions/gsd/tests/resolve-ts.mjs"
 runner_script="${gsd_root}/scripts/headless-auto.mjs"
+supervisor_script="${gsd_root}/scripts/headless-auto-supervisor.mjs"
 launchctl_label="com.gsd.auto.${safe_project_key}"
 launch_agents_dir="${HOME}/Library/LaunchAgents"
 launchctl_plist="${launch_agents_dir}/${launchctl_label}.plist"
@@ -82,7 +83,7 @@ build_launch_env_prefix() {
   local parts=()
   local name value
   for name in "${vars[@]}"; do
-    value="${!name-}"
+    value="${(P)name-}"
     if [[ -n "${value}" ]]; then
       parts+=("${name}=$(shell_quote "${value}")")
     fi
@@ -101,7 +102,7 @@ xml_escape() {
 write_launchctl_plist() {
   mkdir -p "${launch_agents_dir}"
   local command
-  command="cd $(shell_quote "${gsd_root}") && exec node $(shell_quote "${runner_script}") $(shell_quote "${project_path}") $(shell_quote "${log_file}")"
+  command="cd $(shell_quote "${gsd_root}") && exec node $(shell_quote "${supervisor_script}") $(shell_quote "${runner_script}") $(shell_quote "${project_path}") $(shell_quote "${log_file}") $(shell_quote "${runtime_dir}")"
   cat > "${launchctl_plist}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -136,7 +137,7 @@ EOF
   )
   local name value
   for name in "${vars[@]}"; do
-    value="${!name-}"
+    value="${(P)name-}"
     if [[ -n "${value}" ]]; then
       cat >> "${launchctl_plist}" <<EOF
     <key>$(xml_escape "${name}")</key>
@@ -164,7 +165,8 @@ read_launchctl_label() {
 
 is_launchctl_running() {
   local label="${1:-}"
-  [[ -n "${label}" ]] && launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1
+  [[ -n "${label}" ]] || return 1
+  launchctl print "gui/$(id -u)/${label}" 2>/dev/null | grep -q "state = running"
 }
 
 is_pid_running() {
@@ -248,6 +250,12 @@ print_state_summary() {
 }
 
 start_runner() {
+  local stale_lock_pid
+  stale_lock_pid="$(read_lock_pid || true)"
+  if [[ -f "${lock_file}" ]] && { [[ -z "${stale_lock_pid}" ]] || ! is_pid_running "${stale_lock_pid}"; }; then
+    clear_lock_file
+  fi
+
   local label
   label="$(read_launchctl_label || true)"
   if supports_launchctl; then
@@ -292,7 +300,7 @@ start_runner() {
     return 0
   fi
 
-  nohup node "${runner_script}" "${project_path}" "${log_file}" >> "${stdout_file}" 2>&1 &
+  nohup node "${supervisor_script}" "${runner_script}" "${project_path}" "${log_file}" "${runtime_dir}" >> "${stdout_file}" 2>&1 &
   pid="$!"
   echo "${pid}" > "${pid_file}"
   sleep 1

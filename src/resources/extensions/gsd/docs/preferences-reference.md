@@ -27,7 +27,10 @@ Full documentation for `~/.gsd/preferences.md` (global) and `.gsd/preferences.md
 
 - `custom_instructions`: extra durable instructions related to skill use.
 
-- `models`: per-stage model selection for auto-mode. Keys: `research`, `planning`, `execution`, `completion`. Values: model IDs (e.g. `claude-sonnet-4-6`, `claude-opus-4-6`). Omit a key to use whatever model is currently active.
+- `models`: per-stage model selection for auto-mode. Keys: `research`, `planning`, `execution`, `completion`. Each key accepts either:
+  - a model ID string, e.g. `claude-sonnet-4-6`
+  - an object, e.g. `{ model: claude-opus-4-6, fallbacks: [openrouter/z-ai/glm-5] }`
+  Omit a key to use whatever model is currently active.
 
 - `skill_discovery`: controls how GSD discovers and applies skills during auto-mode. Valid values:
   - `auto` — skills are found and applied automatically without prompting.
@@ -39,6 +42,9 @@ Full documentation for `~/.gsd/preferences.md` (global) and `.gsd/preferences.md
   - `soft_timeout_minutes`: minutes before the supervisor issues a soft warning (default: 20).
   - `idle_timeout_minutes`: minutes of inactivity before the supervisor intervenes (default: 10).
   - `hard_timeout_minutes`: minutes before the supervisor forces termination (default: 30).
+
+- `secrets`: proactive secret preparation for auto-mode. Keys:
+  - `proactive_collect`: boolean — when `true`, auto-mode checks a milestone secrets manifest before first dispatch and collects only missing keys. Default: `false`.
 
 - `git`: configures GSD's git behavior. All fields are optional. Keys:
   - `auto_push`: boolean — automatically push commits after committing. Default: `false`.
@@ -67,13 +73,31 @@ Full documentation for `~/.gsd/preferences.md` (global) and `.gsd/preferences.md
 version: 1
 models:
   research: claude-sonnet-4-6
-  planning: claude-opus-4-6
+  planning:
+    model: claude-opus-4-6
+    fallbacks:
+      - openrouter/z-ai/glm-5
+      - openrouter/minimax/minimax-m2.5
   execution: claude-sonnet-4-6
   completion: claude-sonnet-4-6
 ---
 ```
 
-Opus for planning (where architectural decisions matter most), Sonnet for everything else (faster, cheaper). Omit any key to use the currently selected model.
+Opus for planning, Sonnet for everything else, and ordered fallbacks when the primary planning model is unavailable. Omit any key to use the currently selected model.
+
+---
+
+## Secrets Example
+
+```yaml
+---
+version: 1
+secrets:
+  proactive_collect: true
+---
+```
+
+When enabled, GSD looks for `M###-SECRETS.md` before the first auto-mode dispatch of that milestone and only prompts for keys that are still missing.
 
 ---
 

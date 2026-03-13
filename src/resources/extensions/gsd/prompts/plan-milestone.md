@@ -18,6 +18,23 @@ Then:
 7. If planning produced structural decisions (e.g. slice ordering rationale, technology choices, scope exclusions), append them to `.gsd/DECISIONS.md` (read the template at `~/.gsd/agent/extensions/gsd/templates/decisions.md` if the file doesn't exist yet)
 8. Update `.gsd/STATE.md`
 
+## Secret Forecasting
+
+After writing the roadmap, analyze the slices and their boundary maps for external service dependencies (third-party APIs, SaaS platforms, cloud providers, databases requiring credentials, OAuth providers, etc.).
+
+If this milestone requires any external API keys or secrets:
+
+1. Read the template at `~/.gsd/agent/extensions/gsd/templates/secrets-manifest.md`
+2. Write `{{secretsOutputPath}}` listing every predicted secret as an H3 section with:
+   - **Service** — the external service name
+   - **Dashboard** — direct URL to the console/dashboard page where the key is created
+   - **Format hint** — what the key looks like
+   - **Status** — always `pending` during planning
+   - **Destination** — `dotenv`, `vercel`, or `convex` depending on where the key will be consumed
+   - Numbered step-by-step guidance for obtaining the key
+
+If this milestone does not require any external API keys or secrets, skip this step entirely — do not create an empty manifest.
+
 ## Requirement Mapping Rules
 
 - Every Active requirement relevant to this milestone must be in one of these states by the end of planning: mapped to a slice, explicitly deferred, blocked with reason, or moved out of scope.

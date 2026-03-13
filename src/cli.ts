@@ -1,6 +1,5 @@
 import {
   AuthStorage,
-  DefaultResourceLoader,
   InteractiveMode,
   ModelRegistry,
   SessionManager,
@@ -10,60 +9,15 @@ import {
 } from '@mariozechner/pi-coding-agent'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { agentDir, authFilePath, sessionsDir } from './app-paths.js'
+import { agentDir, authFilePath } from './app-paths.js'
+import { createProjectSessionManager, parseCliArgs } from './cli-support.js'
 import { prepareCloudPoolSession } from './cloud-pool.js'
-import { migratePiCredentials } from './pi-migration.js'
+import { getPiDefaultModelAndProvider, migratePiCredentials } from './pi-migration.js'
 import { loadProjectOptionalEnvKeys } from './project-env.js'
 import { buildResourceLoader, initResources } from './resource-loader.js'
 import { ensureManagedTools } from './tool-bootstrap.js'
 import { loadStoredEnvKeys, runWizardIfNeeded } from './wizard.js'
 import { runOnboarding, shouldRunOnboarding } from './onboarding.js'
-
-interface CliFlags {
-  mode?: 'text' | 'json' | 'rpc'
-  print?: boolean
-  noSession?: boolean
-  model?: string
-  extensions: string[]
-  appendSystemPrompt?: string
-  tools?: string[]
-  messages: string[]
-}
-
-function parseCliArgs(argv: string[]): CliFlags {
-  const flags: CliFlags = { extensions: [], messages: [] }
-  const args = argv.slice(2)
-
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i]
-    if (arg === '--mode' && i + 1 < args.length) {
-      const mode = args[++i]
-      if (mode === 'text' || mode === 'json' || mode === 'rpc') flags.mode = mode
-    } else if (arg === '--print' || arg === '-p') {
-      flags.print = true
-    } else if (arg === '--no-session') {
-      flags.noSession = true
-    } else if (arg === '--model' && i + 1 < args.length) {
-      flags.model = args[++i]
-    } else if (arg === '--extension' && i + 1 < args.length) {
-      flags.extensions.push(args[++i])
-    } else if (arg === '--append-system-prompt' && i + 1 < args.length) {
-      flags.appendSystemPrompt = args[++i]
-    } else if (arg === '--tools' && i + 1 < args.length) {
-      flags.tools = args[++i].split(',')
-    } else if (!arg.startsWith('--') && !arg.startsWith('-')) {
-      flags.messages.push(arg)
-    }
-  }
-
-  return flags
-}
-
-function createProjectSessionManager(cwd: string) {
-  const safePath = `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`
-  const projectSessionsDir = join(sessionsDir, safePath)
-  return SessionManager.create(cwd, projectSessionsDir)
-}
 
 function loadAppendSystemPrompt(pathOrText: string | undefined): string | undefined {
   if (!pathOrText) return undefined
@@ -132,18 +86,27 @@ const effectiveProvider = settingsManager.getDefaultProvider()
 const effectiveModel = settingsManager.getDefaultModel()
 const effectiveExists = effectiveProvider && effectiveModel &&
   allModels.some((m) => m.provider === effectiveProvider && m.id === effectiveModel)
+const effectiveAvailable = effectiveProvider && effectiveModel &&
+  availableModels.some((m) => m.provider === effectiveProvider && m.id === effectiveModel)
 
-if (!effectiveModel || !effectiveExists) {
+if (!effectiveModel || !effectiveExists || !effectiveAvailable) {
+  const piDefault = cloudPoolSession.poolActive ? null : getPiDefaultModelAndProvider()
   const preferred =
-    allModels.find((m) => m.provider === 'anthropic' && m.id === 'claude-opus-4-6') ||
-    allModels.find((m) => m.provider === 'anthropic' && m.id.includes('opus')) ||
-    allModels.find((m) => m.provider === 'anthropic')
+    (piDefault
+      ? availableModels.find((m) => m.provider === piDefault.provider && m.id === piDefault.model)
+      : undefined) ||
+    availableModels.find((m) => m.provider === 'openai' && m.id === 'gpt-5.4') ||
+    availableModels.find((m) => m.provider === 'openai') ||
+    availableModels.find((m) => m.provider === 'anthropic' && m.id === 'claude-opus-4-6') ||
+    availableModels.find((m) => m.provider === 'anthropic' && m.id.includes('opus')) ||
+    availableModels.find((m) => m.provider === 'anthropic') ||
+    availableModels[0]
   if (preferred) {
     settingsManager.setDefaultModelAndProvider(preferred.provider, preferred.id)
   }
 }
 
-if (settingsManager.getDefaultThinkingLevel() !== 'off' && !effectiveExists) {
+if (settingsManager.getDefaultThinkingLevel() !== 'off' && (!effectiveExists || !effectiveAvailable)) {
   settingsManager.setDefaultThinkingLevel('off')
 }
 
@@ -162,9 +125,8 @@ async function runCli(): Promise<void> {
     const sessionManager = cliFlags.noSession
       ? SessionManager.inMemory()
       : createProjectSessionManager(cwd)
-    const resourceLoader = new DefaultResourceLoader({
-      agentDir,
-      additionalExtensionPaths: cliFlags.extensions.length > 0 ? cliFlags.extensions : undefined,
+    const resourceLoader = buildResourceLoader(agentDir, {
+      additionalExtensionPaths: cliFlags.extensions,
       appendSystemPrompt: loadAppendSystemPrompt(cliFlags.appendSystemPrompt),
     })
     await resourceLoader.reload()
@@ -200,7 +162,7 @@ async function runCli(): Promise<void> {
     return
   }
 
-  const sessionManager = createProjectSessionManager(cwd)
+  const sessionManager = createProjectSessionManager(cwd, { continueRecent: cliFlags.continue })
   const resourceLoader = buildResourceLoader(agentDir)
   await resourceLoader.reload()
 

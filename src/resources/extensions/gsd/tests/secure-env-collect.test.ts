@@ -1,11 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 
-import { checkExistingEnvKeys, detectDestination } from "../../get-secrets-from-user.ts";
+import {
+  checkExistingEnvKeys,
+  collectSecretsFromManifest,
+  detectDestination,
+} from "../../get-secrets-from-user.ts";
+import { getManifestStatus, parseSecretsManifest } from "../files.ts";
 
 function makeTempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `${prefix}-`));
@@ -72,4 +77,94 @@ test("secure_env_collect: detectDestination prefers vercel over convex and falls
   assert.equal(detectDestination(vercelDir), "vercel");
   assert.equal(detectDestination(convexDir), "convex");
   assert.equal(detectDestination(plainDir), "dotenv");
+});
+
+test("secrets manifest parser and status distinguish env-backed keys from pending ones", async (t) => {
+  const dir = makeTempDir("secure-env-manifest");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  mkdirSync(join(dir, ".gsd", "milestones", "M001"), { recursive: true });
+  writeFileSync(join(dir, ".env"), "OPENAI_API_KEY=present\n", "utf-8");
+  const manifestPath = join(dir, ".gsd", "milestones", "M001", "M001-SECRETS.md");
+  writeFileSync(manifestPath, [
+    "# Secrets Manifest",
+    "",
+    "**Milestone:** M001",
+    "**Generated:** 2026-03-13T00:00:00Z",
+    "",
+    "### OPENAI_API_KEY",
+    "",
+    "**Service:** OpenAI",
+    "**Dashboard:** https://platform.openai.com/api-keys",
+    "**Format hint:** sk-...",
+    "**Status:** pending",
+    "**Destination:** dotenv",
+    "",
+    "1. Open the dashboard",
+    "",
+    "### STRIPE_SECRET_KEY",
+    "",
+    "**Service:** Stripe",
+    "**Dashboard:** https://dashboard.stripe.com/apikeys",
+    "**Format hint:** sk_live_...",
+    "**Status:** pending",
+    "**Destination:** dotenv",
+    "",
+    "1. Open the dashboard",
+  ].join("\n"), "utf-8");
+
+  const parsed = parseSecretsManifest(readFileSync(manifestPath, "utf-8"));
+  const status = await getManifestStatus(dir, "M001");
+
+  assert.equal(parsed.entries.length, 2);
+  assert.deepEqual(status, {
+    pending: ["STRIPE_SECRET_KEY"],
+    collected: [],
+    skipped: [],
+    existing: ["OPENAI_API_KEY"],
+  });
+});
+
+test("collectSecretsFromManifest only prompts for pending keys and updates the manifest", async (t) => {
+  const dir = makeTempDir("secure-env-collect-manifest");
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  mkdirSync(join(dir, ".gsd", "milestones", "M001"), { recursive: true });
+  const manifestPath = join(dir, ".gsd", "milestones", "M001", "M001-SECRETS.md");
+  writeFileSync(manifestPath, [
+    "# Secrets Manifest",
+    "",
+    "**Milestone:** M001",
+    "**Generated:** 2026-03-13T00:00:00Z",
+    "",
+    "### OPENAI_API_KEY",
+    "",
+    "**Service:** OpenAI",
+    "**Dashboard:** https://platform.openai.com/api-keys",
+    "**Format hint:** sk-...",
+    "**Status:** pending",
+    "**Destination:** dotenv",
+    "",
+    "1. Open the dashboard",
+  ].join("\n"), "utf-8");
+
+  const responses = [undefined, "sk-test-value"];
+  const result = await collectSecretsFromManifest(
+    dir,
+    "M001",
+    {
+      hasUI: true,
+      ui: {
+        custom: async () => responses.shift(),
+      },
+    },
+    { cwd: dir },
+  );
+
+  assert.deepEqual(result.applied, ["OPENAI_API_KEY"]);
+  assert.deepEqual(result.skipped, []);
+  assert.deepEqual(result.existingSkipped, []);
+  assert.deepEqual(result.errors, []);
+  assert.match(readFileSync(join(dir, ".env"), "utf-8"), /OPENAI_API_KEY=sk-test-value/);
+  assert.match(readFileSync(manifestPath, "utf-8"), /\*\*Status:\*\* collected/);
 });

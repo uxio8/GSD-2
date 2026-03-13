@@ -98,3 +98,31 @@ test("migratePiCredentials is a no-op when Pi auth is missing", async (t) => {
   assert.equal(migratePiCredentials(auth), false);
   assert.equal(auth.list().length, 0);
 });
+
+test("getPiDefaultModelAndProvider reads Pi settings when present", async (t) => {
+  const home = mkdtempSync(join(tmpdir(), "gsd-pi-home-"));
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+
+  t.after(() => {
+    if (originalHome) process.env.HOME = originalHome;
+    else delete process.env.HOME;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  writeFileSync(
+    join(home, ".pi", "agent", "settings.json"),
+    JSON.stringify({
+      defaultProvider: "openrouter",
+      defaultModel: "anthropic/claude-sonnet-4-6",
+    }),
+    "utf-8",
+  );
+
+  const { getPiDefaultModelAndProvider } = await importMigrationModule(`settings-${Date.now()}`);
+  assert.deepEqual(getPiDefaultModelAndProvider(), {
+    provider: "openrouter",
+    model: "anthropic/claude-sonnet-4-6",
+  });
+});

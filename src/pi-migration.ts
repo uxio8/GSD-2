@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { AuthCredential, AuthStorage } from '@mariozechner/pi-coding-agent'
 
 const PI_AUTH_PATH = join(homedir(), '.pi', 'agent', 'auth.json')
+const PI_SETTINGS_PATH = join(homedir(), '.pi', 'agent', 'settings.json')
 
 const LLM_PROVIDER_IDS = [
   'anthropic',
@@ -21,8 +22,7 @@ const LLM_PROVIDER_IDS = [
 
 export function migratePiCredentials(authStorage: AuthStorage): boolean {
   try {
-    const existing = authStorage.list()
-    const hasLlm = existing.some((id) => LLM_PROVIDER_IDS.includes(id))
+    const hasLlm = LLM_PROVIDER_IDS.some((id) => authStorage.hasAuth(id))
     if (hasLlm) return false
 
     if (!existsSync(PI_AUTH_PATH)) return false
@@ -42,5 +42,24 @@ export function migratePiCredentials(authStorage: AuthStorage): boolean {
     return migratedLlm
   } catch {
     return false
+  }
+}
+
+export function getPiDefaultModelAndProvider(): { provider: string; model: string } | null {
+  try {
+    if (!existsSync(PI_SETTINGS_PATH)) return null
+
+    const raw = readFileSync(PI_SETTINGS_PATH, 'utf-8')
+    const data = JSON.parse(raw) as { defaultProvider?: unknown; defaultModel?: unknown }
+    if (typeof data.defaultProvider !== 'string' || typeof data.defaultModel !== 'string') {
+      return null
+    }
+
+    return {
+      provider: data.defaultProvider,
+      model: data.defaultModel,
+    }
+  } catch {
+    return null
   }
 }

@@ -116,6 +116,33 @@ export interface Continue {
   nextAction: string;
 }
 
+// ─── Secrets Manifest ──────────────────────────────────────────────────────
+
+export type SecretsManifestEntryStatus = 'pending' | 'collected' | 'skipped';
+
+export interface SecretsManifestEntry {
+  key: string;
+  service: string;
+  dashboardUrl: string;
+  guidance: string[];
+  formatHint: string;
+  status: SecretsManifestEntryStatus;
+  destination: string;
+}
+
+export interface SecretsManifest {
+  milestone: string;
+  generatedAt: string;
+  entries: SecretsManifestEntry[];
+}
+
+export interface ManifestStatus {
+  pending: string[];
+  collected: string[];
+  skipped: string[];
+  existing: string[];
+}
+
 // ─── GSD State (Derived Dashboard) ────────────────────────────────────────
 
 export interface ActiveRef {

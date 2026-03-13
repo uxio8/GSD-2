@@ -8,6 +8,8 @@ custom_instructions: []
 models: {}
 skill_discovery:
 auto_supervisor: {}
+secrets:
+  proactive_collect:
 git:
   auto_push:
   push_branches:

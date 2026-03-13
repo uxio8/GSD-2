@@ -24,6 +24,8 @@ const maxConsecutiveRelaunches = 3;
 const maxContextLimitRelaunchesPerUnit = 2;
 const staleStreamingMs = 2 * 60 * 1000;
 const maxStaleStreamingResetsPerUnit = 2;
+const stalledLockMs = 2 * 60 * 1000;
+const promptAutoTimeoutMs = 90 * 1000;
 
 function log(message) {
   mkdirSync(dirname(logFile), { recursive: true });
@@ -61,7 +63,12 @@ async function promptAuto(session, reason) {
   markActivity();
   log(`auto-command start reason=${reason}`);
   try {
-    await session.prompt("/gsd auto");
+    await Promise.race([
+      session.prompt("/gsd auto"),
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error(`prompt-auto-timeout after ${promptAutoTimeoutMs}ms`)), promptAutoTimeoutMs);
+      }),
+    ]);
     markActivity();
     log(`auto-command complete reason=${reason}`);
     return true;
@@ -98,6 +105,7 @@ function setVersionEnv() {
 function setWorkflowEnv() {
   process.env.GSD_BIN_PATH = join(gsdRoot, "dist", "loader.js");
   process.env.GSD_WORKFLOW_PATH = join(gsdRoot, "src", "resources", "GSD-WORKFLOW.md");
+  process.env.GSD_HEADLESS_REUSE_INITIAL_SESSION = "1";
   process.env.GSD_BUNDLED_EXTENSION_PATHS = [
     join(agentDir, "extensions", "gsd", "index.ts"),
     join(agentDir, "extensions", "bg-shell", "index.ts"),
@@ -431,7 +439,15 @@ process.on("SIGINT", async () => {
 });
 
 log(`headless-auto start cwd=${cwd} model=${session.model?.provider ?? "unknown"}/${session.model?.id ?? "unknown"}`);
-await promptAuto(session, "initial");
+let initialPromptOk = await promptAuto(session, "initial");
+if (!initialPromptOk) {
+  await resetSession("initial-retry");
+  initialPromptOk = await promptAuto(session, "initial-retry");
+  if (!initialPromptOk) {
+    log("headless-auto exit initial-prompt-failed");
+    await cleanupAndExit(1);
+  }
+}
 
 let settledChecks = 0;
 let consecutiveRelaunches = 0;
@@ -455,7 +471,11 @@ while (true) {
   log(`heartbeat lock=${lockPresent} streaming=${streaming} phase=${phase} task=${activeTask}`);
 
   if (lockPresent || streaming) {
-    if (lockPresent && streaming && currentUnitId && Date.now() - lastActivityAt >= staleStreamingMs) {
+    const idleMs = Date.now() - lastActivityAt;
+    const stallReason = streaming ? "stale-stream" : "stalled-lock";
+    const stallThresholdMs = streaming ? staleStreamingMs : stalledLockMs;
+
+    if (lockPresent && currentUnitId && idleMs >= stallThresholdMs) {
       if (staleStreamUnitId === currentUnitId) {
         staleStreamResets += 1;
       } else {
@@ -464,20 +484,20 @@ while (true) {
       }
 
       if (staleStreamResets > maxStaleStreamingResetsPerUnit) {
-        log(`headless-auto exit stale-stream-blocked unit=${currentUnitId} phase=${phase} task=${activeTask}`);
+        log(`headless-auto exit stalled-unit-blocked unit=${currentUnitId} streaming=${streaming} phase=${phase} task=${activeTask}`);
         await cleanupAndExit(1);
       }
 
-      log(`stale-stream-detected unit=${currentUnitId} idle_ms=${Date.now() - lastActivityAt} count=${staleStreamResets}`);
+      log(`${stallReason}-detected unit=${currentUnitId} idle_ms=${idleMs} count=${staleStreamResets}`);
       try {
         if (existsSync(autoLock)) unlinkSync(autoLock);
       } catch (error) {
         log(`lock-cleanup-error ${error instanceof Error ? error.message : String(error)}`);
       }
-      await resetSession(`stale-stream-${staleStreamResets}`);
+      await resetSession(`${stallReason}-${staleStreamResets}`);
       const relaunched = await promptAuto(
         session,
-        `stale-stream-${staleStreamResets} phase=${phase} task=${activeTask}`,
+        `${stallReason}-${staleStreamResets} phase=${phase} task=${activeTask}`,
       );
       if (!relaunched) break;
     }

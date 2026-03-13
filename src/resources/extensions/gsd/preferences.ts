@@ -17,11 +17,23 @@ export interface GSDSkillRule {
   avoid?: string[];
 }
 
+export interface GSDPhaseModelConfig {
+  model: string;
+  fallbacks?: string[];
+}
+
+export type GSDModelPreference = string | GSDPhaseModelConfig;
+
 export interface GSDModelConfig {
-  research?: string;   // e.g. "claude-sonnet-4-6"
-  planning?: string;   // e.g. "claude-opus-4-6"
-  execution?: string;  // e.g. "claude-sonnet-4-6"
-  completion?: string; // e.g. "claude-sonnet-4-6"
+  research?: GSDModelPreference;
+  planning?: GSDModelPreference;
+  execution?: GSDModelPreference;
+  completion?: GSDModelPreference;
+}
+
+export interface ResolvedModelConfig {
+  primary: string;
+  fallbacks: string[];
 }
 
 export type SkillDiscoveryMode = "auto" | "suggest" | "off";
@@ -40,6 +52,10 @@ export interface RemoteQuestionsConfig {
   poll_interval_seconds?: number;
 }
 
+export interface GSDSecretsConfig {
+  proactive_collect?: boolean;
+}
+
 export interface GSDPreferences {
   version?: number;
   always_use_skills?: string[];
@@ -53,6 +69,7 @@ export interface GSDPreferences {
   uat_dispatch?: boolean;
   budget_ceiling?: number;
   remote_questions?: RemoteQuestionsConfig;
+  secrets?: GSDSecretsConfig;
   git?: GitPreferences;
 }
 
@@ -463,26 +480,46 @@ export function resolveSkillDiscoveryMode(): SkillDiscoveryMode {
  * Returns undefined if no model preference is set for this unit type.
  */
 export function resolveModelForUnit(unitType: string): string | undefined {
+  const resolved = resolveModelWithFallbacksForUnit(unitType);
+  return resolved?.primary;
+}
+
+export function resolveModelWithFallbacksForUnit(unitType: string): ResolvedModelConfig | undefined {
   const prefs = loadEffectiveGSDPreferences();
   if (!prefs?.preferences.models) return undefined;
   const m = prefs.preferences.models;
 
+  let phaseConfig: GSDModelPreference | undefined;
   switch (unitType) {
     case "research-milestone":
     case "research-slice":
-      return m.research;
+      phaseConfig = m.research;
+      break;
     case "plan-milestone":
     case "plan-slice":
     case "replan-slice":
-      return m.planning;
+      phaseConfig = m.planning;
+      break;
     case "execute-task":
-      return m.execution;
+      phaseConfig = m.execution;
+      break;
     case "complete-slice":
     case "run-uat":
-      return m.completion;
+      phaseConfig = m.completion;
+      break;
     default:
       return undefined;
   }
+
+  if (!phaseConfig) return undefined;
+  if (typeof phaseConfig === "string") {
+    return { primary: phaseConfig, fallbacks: [] };
+  }
+
+  return {
+    primary: phaseConfig.model,
+    fallbacks: phaseConfig.fallbacks ?? [],
+  };
 }
 
 export function resolveAutoSupervisorConfig(): AutoSupervisorConfig {
@@ -495,6 +532,11 @@ export function resolveAutoSupervisorConfig(): AutoSupervisorConfig {
     hard_timeout_minutes: configured.hard_timeout_minutes ?? 30,
     ...(configured.model ? { model: configured.model } : {}),
   };
+}
+
+export function resolveProactiveSecretsEnabled(): boolean {
+  const prefs = loadEffectiveGSDPreferences();
+  return prefs?.preferences.secrets?.proactive_collect ?? false;
 }
 
 function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPreferences {
@@ -513,6 +555,9 @@ function mergePreferences(base: GSDPreferences, override: GSDPreferences): GSDPr
     remote_questions: override.remote_questions
       ? { ...(base.remote_questions ?? {}), ...override.remote_questions }
       : base.remote_questions,
+    secrets: (base.secrets || override.secrets)
+      ? { ...(base.secrets ?? {}), ...(override.secrets ?? {}) }
+      : undefined,
     git: (base.git || override.git)
       ? { ...(base.git ?? {}), ...(override.git ?? {}) }
       : undefined,
@@ -596,6 +641,18 @@ function validatePreferences(preferences: GSDPreferences): {
       validated.budget_ceiling = Number(raw);
     } else {
       errors.push("budget_ceiling must be a finite number");
+    }
+  }
+
+  if (preferences.secrets && typeof preferences.secrets === "object") {
+    const s = preferences.secrets as Record<string, unknown>;
+    const secrets: Record<string, unknown> = {};
+    if (s.proactive_collect !== undefined) {
+      if (typeof s.proactive_collect === "boolean") secrets.proactive_collect = s.proactive_collect;
+      else errors.push("secrets.proactive_collect must be a boolean");
+    }
+    if (Object.keys(secrets).length > 0) {
+      validated.secrets = secrets as GSDSecretsConfig;
     }
   }
 

@@ -69,7 +69,7 @@ function openBrowser(url: string): void {
 
 export function shouldRunOnboarding(authStorage: AuthStorage): boolean {
   if (!process.stdin.isTTY) return false
-  return !authStorage.list().some((provider) => LLM_PROVIDER_IDS.includes(provider as (typeof LLM_PROVIDER_IDS)[number]))
+  return !LLM_PROVIDER_IDS.some((provider) => authStorage.hasAuth(provider))
 }
 
 export async function runOnboarding(authStorage: AuthStorage): Promise<void> {

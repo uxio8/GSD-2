@@ -10,9 +10,13 @@ import { existsSync, statSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, Theme } from "@mariozechner/pi-coding-agent";
 import { CURSOR_MARKER, Editor, type EditorTheme, Key, matchesKey, Text, truncateToWidth } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { makeUI, type ProgressStatus } from "./shared/ui.js";
+import { formatSecretsManifest, parseSecretsManifest } from "./gsd/files.js";
+import { resolveMilestoneFile } from "./gsd/paths.js";
+import type { SecretsManifestEntry } from "./gsd/types.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,6 +30,7 @@ interface ToolResultDetails {
 	environment?: string;
 	applied: string[];
 	skipped: string[];
+	existingSkipped?: string[];
 	detectedDestination?: string;
 }
 
@@ -236,6 +241,235 @@ async function collectOneSecret(
 	});
 }
 
+export const collectOneSecretWithGuidance = collectOneSecret;
+
+export async function showSecretsSummary(
+	ctx: { ui: any; hasUI: boolean },
+	entries: SecretsManifestEntry[],
+	existingKeys: string[],
+): Promise<void> {
+	if (!ctx.hasUI) return;
+
+	const existingSet = new Set(existingKeys);
+
+	await ctx.ui.custom<void>((tui: any, theme: Theme, _kb: any, done: () => void) => {
+		let cachedLines: string[] | undefined;
+
+		function handleInput(_data: string) {
+			done();
+		}
+
+		function render(width: number): string[] {
+			if (cachedLines) return cachedLines;
+
+			const ui = makeUI(theme, width);
+			const lines: string[] = [];
+			const push = (...rows: string[][]) => { for (const row of rows) lines.push(...row); };
+
+			push(ui.bar());
+			push(ui.blank());
+			push(ui.header("  Secrets Summary"));
+			push(ui.blank());
+
+			for (const entry of entries) {
+				let status: ProgressStatus = "pending";
+				let detail: string | undefined;
+
+				if (existingSet.has(entry.key)) {
+					status = "done";
+					detail = "already set";
+				} else if (entry.status === "collected") {
+					status = "done";
+				} else if (entry.status === "skipped") {
+					status = "skipped";
+				}
+
+				push(ui.progressItem(entry.key, status, { detail }));
+			}
+
+			push(ui.blank());
+			push(ui.hints(["any key to continue"]));
+			push(ui.bar());
+
+			cachedLines = lines;
+			return lines;
+		}
+
+		return {
+			render,
+			invalidate: () => { cachedLines = undefined; },
+			handleInput,
+		};
+	});
+}
+
+async function applySecrets(
+	provided: Array<{ key: string; value: string }>,
+	destination: "dotenv" | "vercel" | "convex",
+	options: {
+		envFilePath: string;
+		environment?: string;
+		exec?: (cmd: string, args: string[]) => Promise<{ code: number; stderr: string }>;
+	},
+): Promise<{ applied: string[]; errors: string[] }> {
+	const applied: string[] = [];
+	const errors: string[] = [];
+
+	if (destination === "dotenv") {
+		for (const { key, value } of provided) {
+			try {
+				await writeEnvKey(options.envFilePath, key, value);
+				applied.push(key);
+			} catch (err: any) {
+				errors.push(`${key}: ${err.message}`);
+			}
+		}
+	}
+
+	if (destination === "vercel") {
+		if (!options.exec) {
+			errors.push("vercel: command execution unavailable");
+		} else {
+			const env = options.environment ?? "development";
+			for (const { key, value } of provided) {
+				try {
+					const result = await options.exec("sh", [
+						"-c",
+						`printf %s ${shellEscapeSingle(value)} | vercel env add ${key} ${env}`,
+					]);
+					if (result.code !== 0) {
+						errors.push(`${key}: ${result.stderr.slice(0, 200)}`);
+					} else {
+						applied.push(key);
+					}
+				} catch (err: any) {
+					errors.push(`${key}: ${err.message}`);
+				}
+			}
+		}
+	}
+
+	if (destination === "convex") {
+		if (!options.exec) {
+			errors.push("convex: command execution unavailable");
+		} else {
+			for (const { key, value } of provided) {
+				try {
+					const result = await options.exec("sh", [
+						"-c",
+						`npx convex env set ${key} ${shellEscapeSingle(value)}`,
+					]);
+					if (result.code !== 0) {
+						errors.push(`${key}: ${result.stderr.slice(0, 200)}`);
+					} else {
+						applied.push(key);
+					}
+				} catch (err: any) {
+					errors.push(`${key}: ${err.message}`);
+				}
+			}
+		}
+	}
+
+	return { applied, errors };
+}
+
+export async function collectSecretsFromManifest(
+	base: string,
+	milestoneId: string,
+	ctx: { ui: any; hasUI: boolean },
+	options?: {
+		cwd?: string;
+		environment?: string;
+		exec?: (cmd: string, args: string[]) => Promise<{ code: number; stderr: string }>;
+	},
+): Promise<{ applied: string[]; skipped: string[]; existingSkipped: string[]; errors: string[] }> {
+	const manifestPath = resolveMilestoneFile(base, milestoneId, "SECRETS");
+	if (!manifestPath) {
+		throw new Error(`Secrets manifest not found for milestone ${milestoneId}`);
+	}
+
+	const content = await readFile(manifestPath, "utf8");
+	const manifest = parseSecretsManifest(content);
+	const cwd = options?.cwd ?? base;
+	const envPath = resolve(cwd, ".env");
+	const existingKeys = await checkExistingEnvKeys(
+		manifest.entries.map((entry) => entry.key),
+		envPath,
+	);
+	const existingSet = new Set(existingKeys);
+	const existingSkipped: string[] = [];
+	const alreadySkipped: string[] = [];
+	const pendingEntries: SecretsManifestEntry[] = [];
+
+	for (const entry of manifest.entries) {
+		if (existingSet.has(entry.key)) {
+			existingSkipped.push(entry.key);
+		} else if (entry.status === "skipped") {
+			alreadySkipped.push(entry.key);
+		} else if (entry.status === "pending") {
+			pendingEntries.push(entry);
+		}
+	}
+
+	await showSecretsSummary(ctx, manifest.entries, existingKeys);
+
+	const collected: CollectedSecret[] = [];
+	for (let i = 0; i < pendingEntries.length; i++) {
+		const entry = pendingEntries[i];
+		const value = await collectOneSecret(
+			ctx,
+			i,
+			pendingEntries.length,
+			entry.key,
+			entry.formatHint || undefined,
+			entry.guidance.length > 0 ? entry.guidance : undefined,
+		);
+		collected.push({ key: entry.key, value });
+	}
+
+	for (const { key, value } of collected) {
+		const entry = manifest.entries.find((candidate) => candidate.key === key);
+		if (entry) {
+			entry.status = value !== null ? "collected" : "skipped";
+		}
+	}
+
+	await writeFile(manifestPath, formatSecretsManifest(manifest), "utf8");
+
+	const defaultDestination = detectDestination(cwd);
+	const providedByDestination = new Map<"dotenv" | "vercel" | "convex", Array<{ key: string; value: string }>>();
+	for (const collectedSecret of collected) {
+		if (collectedSecret.value === null) continue;
+		const entry = manifest.entries.find((candidate) => candidate.key === collectedSecret.key);
+		const destination = entry?.destination === "vercel" || entry?.destination === "convex" || entry?.destination === "dotenv"
+			? entry.destination
+			: defaultDestination;
+		const existing = providedByDestination.get(destination) ?? [];
+		existing.push({ key: collectedSecret.key, value: collectedSecret.value });
+		providedByDestination.set(destination, existing);
+	}
+
+	const applied: string[] = [];
+	const errors: string[] = [];
+	for (const [destination, provided] of providedByDestination.entries()) {
+		const result = await applySecrets(provided, destination, {
+			envFilePath: envPath,
+			environment: options?.environment,
+			exec: options?.exec,
+		});
+		applied.push(...result.applied);
+		errors.push(...result.errors);
+	}
+
+	const skipped = [
+		...alreadySkipped,
+		...collected.filter((entry) => entry.value === null).map((entry) => entry.key),
+	];
+
+	return { applied, skipped, existingSkipped, errors };
+}
+
 // ─── Extension ────────────────────────────────────────────────────────────────
 
 export default function secureEnv(pi: ExtensionAPI) {
@@ -300,58 +534,11 @@ export default function secureEnv(pi: ExtensionAPI) {
 
 			const provided = collected.filter((c) => c.value !== null) as Array<{ key: string; value: string }>;
 			const skipped = collected.filter((c) => c.value === null).map((c) => c.key);
-			const applied: string[] = [];
-			const errors: string[] = [];
-
-			// Apply to destination
-			if (destination === "dotenv") {
-				const filePath = resolve(ctx.cwd, params.envFilePath ?? ".env");
-				for (const { key, value } of provided) {
-					try {
-						await writeEnvKey(filePath, key, value);
-						applied.push(key);
-					} catch (err: any) {
-						errors.push(`${key}: ${err.message}`);
-					}
-				}
-			}
-
-			if (destination === "vercel") {
-				const env = params.environment ?? "development";
-				for (const { key, value } of provided) {
-					try {
-						const result = await pi.exec("sh", [
-							"-c",
-							`printf %s ${shellEscapeSingle(value)} | vercel env add ${key} ${env}`,
-						]);
-						if (result.code !== 0) {
-							errors.push(`${key}: ${result.stderr.slice(0, 200)}`);
-						} else {
-							applied.push(key);
-						}
-					} catch (err: any) {
-						errors.push(`${key}: ${err.message}`);
-					}
-				}
-			}
-
-			if (destination === "convex") {
-				for (const { key, value } of provided) {
-					try {
-						const result = await pi.exec("sh", [
-							"-c",
-							`npx convex env set ${key} ${shellEscapeSingle(value)}`,
-						]);
-						if (result.code !== 0) {
-							errors.push(`${key}: ${result.stderr.slice(0, 200)}`);
-						} else {
-							applied.push(key);
-						}
-					} catch (err: any) {
-						errors.push(`${key}: ${err.message}`);
-					}
-				}
-			}
+			const { applied, errors } = await applySecrets(provided, destination, {
+				envFilePath: resolve(ctx.cwd, params.envFilePath ?? ".env"),
+				environment: params.environment,
+				exec: (cmd, args) => pi.exec(cmd, args),
+			});
 
 			const details: ToolResultDetails = {
 				destination,

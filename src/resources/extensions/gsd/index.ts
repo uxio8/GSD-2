@@ -55,6 +55,7 @@ import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { Text } from "@mariozechner/pi-tui";
 import { shortcutDesc } from "../shared/terminal.js";
+import { exitGracefully, killImmediately } from "./exit.js";
 
 // ── ASCII logo ────────────────────────────────────────────────────────────
 const GSD_LOGO_LINES = [
@@ -71,9 +72,16 @@ export default function (pi: ExtensionAPI) {
   registerWorktreeCommand(pi);
 
   pi.registerCommand("exit", {
-    description: "Exit GSD immediately",
+    description: "Exit GSD gracefully (saves auto-mode state)",
+    handler: async (ctx) => {
+      await exitGracefully(ctx, pi);
+    },
+  });
+
+  pi.registerCommand("kill", {
+    description: "Exit GSD immediately (no cleanup)",
     handler: async () => {
-      process.exit(0);
+      killImmediately();
     },
   });
 
