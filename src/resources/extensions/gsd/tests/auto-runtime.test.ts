@@ -145,3 +145,13 @@ test("maybeCollectProactiveSecrets skips prompting when secrets are already sati
   assert.equal(result, null);
   assert.equal(customCalls, 0);
 });
+
+test("capRecoveryInjection truncates oversized retry payloads", async () => {
+  const { capRecoveryInjection } = await importAutoModule(`cap-${Date.now()}`);
+  const huge = "x".repeat(60_000);
+
+  const capped = capRecoveryInjection(huge, "diagnostic");
+
+  assert.equal(capped.includes("[...diagnostic truncated to prevent memory exhaustion]"), true);
+  assert.equal(capped.length < huge.length, true);
+});

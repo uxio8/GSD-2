@@ -98,8 +98,9 @@ export class GitServiceImpl {
     return runGit(this.basePath, args, options);
   }
 
-  private smartStage(): void {
-    const excludes = RUNTIME_EXCLUSION_PATHS.map((path) => `:(exclude)${path}`);
+  private smartStage(extraExclusions: readonly string[] = []): void {
+    const excludes = [...RUNTIME_EXCLUSION_PATHS, ...extraExclusions]
+      .map((path) => `:(exclude)${path}`);
     try {
       this.git(["add", "-A", "--", ".", ...excludes]);
     } catch {
@@ -132,11 +133,11 @@ export class GitServiceImpl {
     return opts.message;
   }
 
-  autoCommit(unitType: string, unitId: string): string | null {
+  autoCommit(unitType: string, unitId: string, extraExclusions: readonly string[] = []): string | null {
     const status = this.git(["status", "--short"], { allowFailure: true });
     if (!status) return null;
 
-    this.smartStage();
+    this.smartStage(extraExclusions);
     const staged = this.git(["diff", "--cached", "--stat"], { allowFailure: true });
     if (!staged) return null;
 
@@ -283,7 +284,7 @@ export class GitServiceImpl {
       }
     }
 
-    this.autoCommit("pre-switch", current);
+    this.autoCommit("pre-switch", current, [".gsd/"]);
     this.git(["checkout", branch]);
 
     if (!created) {
@@ -311,7 +312,7 @@ export class GitServiceImpl {
     const current = this.getCurrentBranch();
     if (current === integrationBranch) return;
 
-    this.autoCommit("pre-switch", current);
+    this.autoCommit("pre-switch", current, [".gsd/"]);
     this.git(["checkout", integrationBranch]);
   }
 

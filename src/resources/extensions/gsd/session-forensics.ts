@@ -24,6 +24,8 @@ import { basename, join } from "node:path";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+const MAX_JSONL_PARSE_CHARS = 10 * 1024 * 1024;
+
 export interface ToolCall {
   name: string;
   input: Record<string, unknown>;
@@ -62,8 +64,20 @@ export interface RecoveryBriefing {
 
 // ─── JSONL Parsing ────────────────────────────────────────────────────────────
 
+function limitJSONLForParse(raw: string): string {
+  if (raw.length <= MAX_JSONL_PARSE_CHARS) return raw;
+
+  const start = raw.length - MAX_JSONL_PARSE_CHARS;
+  const nextNewline = raw.indexOf("\n", start);
+  if (nextNewline === -1) return raw.slice(start);
+  return raw.slice(nextNewline + 1);
+}
+
 function parseJSONL(raw: string): unknown[] {
-  return raw.trim().split("\n").map(line => {
+  const limited = limitJSONLForParse(raw).trim();
+  if (!limited) return [];
+
+  return limited.split("\n").map(line => {
     try { return JSON.parse(line); }
     catch { return null; }
   }).filter(Boolean) as unknown[];

@@ -167,6 +167,7 @@ let wrapupWarningHandle: ReturnType<typeof setTimeout> | null = null;
 let idleWatchdogHandle: ReturnType<typeof setInterval> | null = null;
 let dispatchInProgress = false;
 let dispatchQueued = false;
+const MAX_RECOVERY_INJECTION_CHARS = 50_000;
 
 function traceHeadlessAuto(message: string): void {
   const traceFile = process.env.GSD_HEADLESS_TRACE_FILE;
@@ -176,6 +177,11 @@ function traceHeadlessAuto(message: string): void {
   } catch {
     // Non-fatal tracing only.
   }
+}
+
+export function capRecoveryInjection(content: string, label: string): string {
+  if (content.length <= MAX_RECOVERY_INJECTION_CHARS) return content;
+  return `${content.slice(0, MAX_RECOVERY_INJECTION_CHARS)}\n\n[...${label} truncated to prevent memory exhaustion]`;
 }
 
 function formatWidgetTokens(count: number): string {
@@ -611,7 +617,11 @@ export async function handleAgentEnd(
 
     try {
       const doctorScope = currentUnit.id.split("/").slice(0, 2).join("/");
-      const report = await runGSDDoctor(basePath, { fix: true, scope: doctorScope || undefined });
+      const report = await runGSDDoctor(basePath, {
+        fix: true,
+        scope: doctorScope || undefined,
+        fixLevel: "task",
+      });
       if (report.fixesApplied.length > 0) {
         ctx.ui.notify(`Post-hook: applied ${report.fixesApplied.length} fix(es).`, "info");
       }
@@ -1482,12 +1492,12 @@ async function dispatchNextUnitInner(
   // On retry (stuck detection), prepend deep diagnostic from last attempt
   let finalPrompt = prompt;
   if (pendingCrashRecovery) {
-    finalPrompt = `${pendingCrashRecovery}\n\n---\n\n${finalPrompt}`;
+    finalPrompt = `${capRecoveryInjection(pendingCrashRecovery, "recovery briefing")}\n\n---\n\n${finalPrompt}`;
     pendingCrashRecovery = null;
   } else if ((unitDispatchCount.get(dispatchKey) ?? 0) > 1) {
     const diagnostic = getDeepDiagnostic(basePath);
     if (diagnostic) {
-      finalPrompt = `**RETRY — your previous attempt did not produce the required artifact.**\n\nDiagnostic from previous attempt:\n${diagnostic}\n\nFix whatever went wrong and make sure you write the required file this time.\n\n---\n\n${finalPrompt}`;
+      finalPrompt = `**RETRY — your previous attempt did not produce the required artifact.**\n\nDiagnostic from previous attempt:\n${capRecoveryInjection(diagnostic, "diagnostic")}\n\nFix whatever went wrong and make sure you write the required file this time.\n\n---\n\n${finalPrompt}`;
     }
   }
 

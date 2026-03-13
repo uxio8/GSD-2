@@ -111,6 +111,60 @@ function cleanup(base: string): void {
   }
 }
 
+{
+  console.log("\n=== getDeepDiagnostic: parses trailing entries from oversized activity log ===");
+  const base = createBase();
+  try {
+    const activityPath = join(base, ".gsd", "activity", "002-execute-task-M003-S01-T02.jsonl");
+    const oversizedEntry = JSON.stringify({
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "x".repeat(11 * 1024 * 1024) }],
+      },
+    });
+    const trailingEntries = [
+      { type: "custom_message", customType: "gsd-auto", content: "last unit" },
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "write-last",
+              name: "write",
+              arguments: { path: "last.txt", content: "ok" },
+            },
+          ],
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "write-last",
+          toolName: "write",
+          isError: false,
+          content: [{ type: "text", text: "ok" }],
+        },
+      },
+    ];
+
+    writeFileSync(
+      activityPath,
+      `${oversizedEntry}\n${trailingEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+      "utf-8",
+    );
+
+    const diagnostic = getDeepDiagnostic(base);
+    assert(!!diagnostic, "should still produce a diagnostic for oversized logs");
+    assert(diagnostic!.includes("last.txt"), "should keep trailing entries within the parse cap");
+  } finally {
+    cleanup(base);
+  }
+}
+
 if (failed > 0) {
   console.error(`\n${passed} passed, ${failed} failed`);
   process.exit(1);

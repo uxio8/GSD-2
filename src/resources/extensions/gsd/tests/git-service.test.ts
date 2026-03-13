@@ -58,6 +58,38 @@ test("commit smart-stages source changes but excludes GSD runtime files", (t) =>
   assert.deepEqual(names, ["src/app.ts"]);
 });
 
+test("autoCommit excludes .gsd when passed as an extra exclusion", (t) => {
+  const repo = createRepo();
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+
+  mkdirSync(join(repo, ".gsd", "milestones", "M001"), { recursive: true });
+  mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "- [x] S01\n", "utf-8");
+  writeFileSync(join(repo, "src", "feature.ts"), "export const feature = true;\n", "utf-8");
+
+  const svc = new GitServiceImpl(repo);
+  const message = svc.autoCommit("pre-switch", "main", [".gsd/"]);
+
+  assert.equal(message, "chore(main): auto-commit after pre-switch");
+  const names = run("git show --pretty='' --name-only HEAD", repo).split("\n").filter(Boolean);
+  assert.deepEqual(names, ["src/feature.ts"]);
+});
+
+test("autoCommit returns null when extra exclusions filter out all dirty files", (t) => {
+  const repo = createRepo();
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+
+  mkdirSync(join(repo, ".gsd", "milestones", "M001"), { recursive: true });
+  writeFileSync(join(repo, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "- [x] S01\n", "utf-8");
+  writeFileSync(join(repo, ".gsd", "STATE.md"), "state\n", "utf-8");
+
+  const svc = new GitServiceImpl(repo);
+  const message = svc.autoCommit("pre-switch", "main", [".gsd/"]);
+
+  assert.equal(message, null);
+  assert.equal(run("git status --short", repo).includes(".gsd/"), true);
+});
+
 test("ensureSliceBranch preserves the current non-slice integration branch", (t) => {
   const repo = createRepo();
   t.after(() => rmSync(repo, { recursive: true, force: true }));
