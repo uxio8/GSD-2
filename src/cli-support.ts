@@ -5,6 +5,8 @@ import { sessionsDir } from './app-paths.js'
 export interface CliFlags {
   mode?: 'text' | 'json' | 'rpc'
   print?: boolean
+  help?: boolean
+  version?: boolean
   continue?: boolean
   noSession?: boolean
   model?: string
@@ -25,6 +27,10 @@ export function parseCliArgs(argv: string[]): CliFlags {
       if (mode === 'text' || mode === 'json' || mode === 'rpc') flags.mode = mode
     } else if (arg === '--print' || arg === '-p') {
       flags.print = true
+    } else if (arg === '--help' || arg === '-h') {
+      flags.help = true
+    } else if (arg === '--version' || arg === '-v') {
+      flags.version = true
     } else if (arg === '--continue' || arg === '-c') {
       flags.continue = true
     } else if (arg === '--no-session') {
@@ -43,6 +49,35 @@ export function parseCliArgs(argv: string[]): CliFlags {
   }
 
   return flags
+}
+
+export function formatCliHelp(version: string): string {
+  return [
+    `GSD v${version} — Get Shit Done`,
+    '',
+    'Usage:',
+    '  gsd                               Interactive mode (TTY required)',
+    '  gsd --print [message...]          Single-shot print mode',
+    '  gsd --mode <text|json|rpc>        Non-interactive mode',
+    '',
+    'Options:',
+    '  --print, -p                       Run in print mode',
+    '  --mode <text|json|rpc>            Set output mode',
+    '  --continue, -c                    Resume the most recent session for this cwd',
+    '  --model <id>                      Override the active model',
+    '  --no-session                      Disable session persistence',
+    '  --extension <path>                Load an additional extension',
+    '  --append-system-prompt <value>    Append a prompt file or literal text',
+    '  --tools <a,b,c>                   Restrict available tools',
+    '  --help, -h                        Show this help text',
+    '  --version, -v                     Print version and exit',
+    '',
+  ].join('\n')
+}
+
+export function getInteractiveCliError(isPrintMode: boolean, stdinIsTTY: boolean): string | null {
+  if (isPrintMode || stdinIsTTY) return null
+  return 'GSD interactive mode requires a TTY. Use --print or --mode text|json|rpc for non-interactive runs.'
 }
 
 export function getProjectSessionsDir(cwd: string): string {

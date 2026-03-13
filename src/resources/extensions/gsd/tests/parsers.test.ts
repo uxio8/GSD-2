@@ -801,6 +801,36 @@ Tested.
   assertEq(s.frontmatter.requires[2].provides, 'state engine', 'third requires provides');
 }
 
+console.log('\n=== parseSummary: bare scalar frontmatter values coerce to arrays ===');
+{
+  const content = `---
+id: T07
+parent: S03
+milestone: M001
+provides: none
+affects: app-shell
+key_files: src/app.ts
+key_decisions: use feature flag
+patterns_established: optimistic update
+drill_down_paths: src/lib/runtime.ts
+observability_surfaces: logs/session
+---
+
+# T07: Scalar arrays
+
+**Coerce scalar values safely.**
+`;
+
+  const s = parseSummary(content);
+  assertEq(s.frontmatter.provides, ['none'], 'provides scalar coerced to array');
+  assertEq(s.frontmatter.affects, ['app-shell'], 'affects scalar coerced to array');
+  assertEq(s.frontmatter.key_files, ['src/app.ts'], 'key_files scalar coerced to array');
+  assertEq(s.frontmatter.key_decisions, ['use feature flag'], 'key_decisions scalar coerced to array');
+  assertEq(s.frontmatter.patterns_established, ['optimistic update'], 'patterns_established scalar coerced to array');
+  assertEq(s.frontmatter.drill_down_paths, ['src/lib/runtime.ts'], 'drill_down_paths scalar coerced to array');
+  assertEq(s.frontmatter.observability_surfaces, ['logs/session'], 'observability_surfaces scalar coerced to array');
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // parseContinue tests
 // ═══════════════════════════════════════════════════════════════════════════

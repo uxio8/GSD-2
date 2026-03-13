@@ -415,3 +415,43 @@ test("gsd launches and loads extensions without errors", async () => {
     "no ERR_MODULE_NOT_FOUND",
   );
 });
+
+test("gsd --version and --help exit cleanly without interactive startup", async () => {
+  execSync("npm run build", { cwd: projectRoot, stdio: "pipe" });
+
+  const versionOutput = execSync("node dist/loader.js --version", {
+    cwd: projectRoot,
+    encoding: "utf-8",
+  });
+  assert.match(versionOutput, /^\d+\.\d+\.\d+\n$/);
+
+  const helpOutput = execSync("node dist/loader.js --help", {
+    cwd: projectRoot,
+    encoding: "utf-8",
+  });
+  assert.match(helpOutput, /Usage:/);
+  assert.match(helpOutput, /--mode <text\|json\|rpc>/);
+});
+
+test("gsd without tty exits with a helpful interactive-mode error", async () => {
+  execSync("npm run build", { cwd: projectRoot, stdio: "pipe" });
+
+  const child = spawn("node", ["dist/loader.js"], {
+    cwd: projectRoot,
+    env: process.env,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  child.stdin.end();
+
+  const { code, stderr } = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
+    let stderr = "";
+    child.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+    child.on("close", (code) => resolve({ code, stderr }));
+  });
+
+  assert.equal(code, 1);
+  assert.match(stderr, /requires a TTY/);
+});

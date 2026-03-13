@@ -6,11 +6,12 @@ import {
   SettingsManager,
   createAgentSession,
   runPrintMode,
+  runRpcMode,
 } from '@mariozechner/pi-coding-agent'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { agentDir, authFilePath } from './app-paths.js'
-import { createProjectSessionManager, parseCliArgs } from './cli-support.js'
+import { createProjectSessionManager, formatCliHelp, getInteractiveCliError, parseCliArgs } from './cli-support.js'
 import { prepareCloudPoolSession } from './cloud-pool.js'
 import { getPiDefaultModelAndProvider, migratePiCredentials } from './pi-migration.js'
 import { loadProjectOptionalEnvKeys } from './project-env.js'
@@ -29,7 +30,24 @@ function loadAppendSystemPrompt(pathOrText: string | undefined): string | undefi
 }
 
 const cliFlags = parseCliArgs(process.argv)
+
+if (cliFlags.version) {
+  process.stdout.write(`${process.env.GSD_VERSION || '0.0.0'}\n`)
+  process.exit(0)
+}
+
+if (cliFlags.help) {
+  process.stdout.write(formatCliHelp(process.env.GSD_VERSION || '0.0.0'))
+  process.exit(0)
+}
+
 const isPrintMode = cliFlags.print || cliFlags.mode !== undefined
+const interactiveCliError = getInteractiveCliError(isPrintMode, !!process.stdin.isTTY)
+
+if (interactiveCliError) {
+  process.stderr.write(`${interactiveCliError}\n`)
+  process.exit(1)
+}
 
 if (!isPrintMode && cliFlags.messages[0] === 'config') {
   await runOnboarding(AuthStorage.create(authFilePath))
@@ -155,10 +173,12 @@ async function runCli(): Promise<void> {
     }
 
     const mode = cliFlags.mode || 'text'
-    await runPrintMode(session, {
-      mode: mode === 'rpc' ? 'json' : mode,
-      messages: cliFlags.messages,
-    })
+    if (mode === 'rpc') {
+      await runRpcMode(session)
+      return
+    }
+
+    await runPrintMode(session, { mode, messages: cliFlags.messages })
     return
   }
 
