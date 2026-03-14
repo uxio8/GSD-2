@@ -9,6 +9,7 @@ import {
   checkExistingEnvKeys,
   collectSecretsFromManifest,
   detectDestination,
+  showSecretsSummary,
 } from "../../get-secrets-from-user.ts";
 import { getManifestStatus, parseSecretsManifest } from "../files.ts";
 
@@ -167,4 +168,34 @@ test("collectSecretsFromManifest only prompts for pending keys and updates the m
   assert.deepEqual(result.errors, []);
   assert.match(readFileSync(join(dir, ".env"), "utf-8"), /OPENAI_API_KEY=sk-test-value/);
   assert.match(readFileSync(manifestPath, "utf-8"), /\*\*Status:\*\* collected/);
+});
+
+test("showSecretsSummary resolves cleanly when the user continues without a payload", async () => {
+  let resolvedValue: null | undefined;
+
+  await showSecretsSummary(
+    {
+      hasUI: true,
+      ui: {
+        custom: async (factory: (tui: any, theme: any, kb: any, done: (result: null) => void) => { handleInput: (data: string) => void }) => {
+          await new Promise<void>((resolve) => {
+            const component = factory(
+              { requestRender() {} },
+              { fg: (_name: string, value: string) => value, bold: (value: string) => value },
+              null,
+              (result: null) => {
+                resolvedValue = result;
+                resolve();
+              },
+            );
+            component.handleInput(" ");
+          });
+        },
+      },
+    },
+    [{ key: "OPENAI_API_KEY", service: "OpenAI", destination: "dotenv", status: "pending" }],
+    [],
+  );
+
+  assert.equal(resolvedValue, null);
 });

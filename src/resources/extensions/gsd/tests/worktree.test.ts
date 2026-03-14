@@ -222,6 +222,33 @@ async function main(): Promise<void> {
   assert(readFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S03", "S03-SUMMARY.md"), "utf-8").includes("S03 Summary"), "main received the completed slice summary");
   assertEq(findPendingCompletedSliceMerge(base, "M001"), null, "no pending merge remains after recovery");
 
+  console.log("\n=== findPendingCompletedSliceMerge ignores worktree-namespaced branches ===");
+  mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S98", "tasks"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), [
+    "# M001: Demo", "", "## Slices",
+    "- [x] **S01: Slice One** `risk:low` `depends:[]`", "  > Done",
+    "- [x] **S02: Slice Two** `risk:low` `depends:[]`", "  > Done",
+    "- [x] **S03: Slice Three** `risk:low` `depends:[]`", "  > Done",
+    "- [ ] **S98: Worktree Only** `risk:low` `depends:[]`", "  > Ignore",
+  ].join("\n") + "\n", "utf-8");
+  run("git add .gsd/milestones/M001/M001-ROADMAP.md", base);
+  run("git commit -m 'chore: add S98 roadmap entry'", base);
+
+  run("git checkout -b gsd/demo/M001/S98", base);
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), [
+    "# M001: Demo", "", "## Slices",
+    "- [x] **S01: Slice One** `risk:low` `depends:[]`", "  > Done",
+    "- [x] **S02: Slice Two** `risk:low` `depends:[]`", "  > Done",
+    "- [x] **S03: Slice Three** `risk:low` `depends:[]`", "  > Done",
+    "- [x] **S98: Worktree Only** `risk:low` `depends:[]`", "  > Ignore",
+  ].join("\n") + "\n", "utf-8");
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S98", "S98-SUMMARY.md"), "# S98 Summary\n", "utf-8");
+  run("git add .gsd/milestones/M001/M001-ROADMAP.md .gsd/milestones/M001/slices/S98/S98-SUMMARY.md", base);
+  run("git commit -m 'feat: complete namespaced slice branch'", base);
+  run("git checkout main", base);
+
+  assertEq(findPendingCompletedSliceMerge(base, "M001"), null, "namespaced worktree branch is ignored during pending merge recovery");
+
   console.log("\n=== worktree anchor branch stays local ===");
   run("git checkout -b worktree/demo", base);
   ensureSliceBranch(base, "M001", "S04");

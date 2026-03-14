@@ -14,7 +14,7 @@ index 51cdae9..d718c68 100644
  export function getDebugLogPath() {
      return join(getAgentDir(), `${APP_NAME}-debug.log`);
 diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
-index 90622c2..7a97428 100644
+index 90622c2..66d10e4 100644
 --- a/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
 @@ -627,7 +627,7 @@ export class AgentSession {
@@ -92,10 +92,16 @@ index 90622c2..7a97428 100644
              });
          this._baseToolRegistry = new Map(Object.entries(baseTools).map(([name, tool]) => [name, tool]));
          const extensionsResult = this._resourceLoader.getExtensions();
-@@ -1819,6 +1822,19 @@ export class AgentSession {
-         // Match: overloaded_error, rate limit, 429, 500, 502, 503, 504, service unavailable, connection errors, fetch failed, terminated, retry delay exceeded
-         return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay/i.test(err);
-     }
+@@ -1816,8 +1819,22 @@ export class AgentSession {
+         if (isContextOverflow(message, contextWindow))
+             return false;
+         const err = message.errorMessage;
+-        // Match: overloaded_error, rate limit, 429, 500, 502, 503, 504, service unavailable, connection errors, fetch failed, terminated, retry delay exceeded
+-        return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay/i.test(err);
++        // Match: overloaded_error, rate limit, 429, 500, 502, 503, 504, service unavailable,
++        // connection errors, transient auth failures, temporary credential backoff, retry delay exceeded
++        return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|network.?(?:is\s+)?unavailable|credentials.*expired|temporarily backed off|terminated|retry delay/i.test(err);
++    }
 +    _classifyErrorType(errorMessage) {
 +        const normalized = errorMessage.toLowerCase();
 +        if (/quota|usage limit|billing|credit|insufficient_quota|exceeded your current quota/.test(normalized)) {
@@ -108,11 +114,10 @@ index 90622c2..7a97428 100644
 +            return "server_error";
 +        }
 +        return "unknown";
-+    }
+     }
      /**
       * Handle retryable errors with exponential backoff.
-      * @returns true if retry was initiated, false if max retries exceeded or disabled
-@@ -1836,6 +1852,28 @@ export class AgentSession {
+@@ -1836,6 +1853,28 @@ export class AgentSession {
                  this._retryResolve = resolve;
              });
          }
@@ -141,7 +146,7 @@ index 90622c2..7a97428 100644
          this._retryAttempt++;
          if (this._retryAttempt > settings.maxRetries) {
              // Max retries exceeded, emit final failure and reset
-@@ -1849,7 +1887,26 @@ export class AgentSession {
+@@ -1849,7 +1888,26 @@ export class AgentSession {
              this._resolveRetry(); // Resolve so waitForRetry() completes
              return false;
          }
@@ -169,7 +174,7 @@ index 90622c2..7a97428 100644
          this._emit({
              type: "auto_retry_start",
              attempt: this._retryAttempt,
-@@ -2216,7 +2273,7 @@ export class AgentSession {
+@@ -2216,7 +2274,7 @@ export class AgentSession {
          let summaryDetails;
          if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
              const model = this.model;
@@ -1017,6 +1022,77 @@ index 55800be..520ab0b 100644
          // Check if pattern contains glob characters
          if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
              // Extract optional thinking level suffix (e.g., "provider/*:high")
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/sdk.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/sdk.js
+index 438ac8c..482665b 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/core/sdk.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/sdk.js
+@@ -21,6 +21,13 @@ createCodingTools, createReadOnlyTools, createReadTool, createBashTool, createEd
+ function getDefaultAgentDir() {
+     return getAgentDir();
+ }
++function sleep(ms) {
++    return new Promise((resolve) => setTimeout(resolve, ms));
++}
++function isTransientCredentialError(error) {
++    const message = error instanceof Error ? error.message : String(error ?? "");
++    return /network.?(?:is\s+)?unavailable|fetch failed|connection.?error|connection.?refused|socket hang up|econnreset|etimedout|temporarily backed off|credentials.*expired|timed out|reset before headers/i.test(message);
++}
+ /**
+  * Create an AgentSession with the specified options.
+  *
+@@ -191,19 +198,41 @@ export async function createAgentSession(options = {}) {
+             if (!resolvedProvider) {
+                 throw new Error("No model selected");
+             }
+-            const key = await modelRegistry.getApiKeyForProvider(resolvedProvider);
+-            if (!key) {
+-                const model = agent.state.model;
+-                const isOAuth = model && modelRegistry.isUsingOAuth(model);
+-                if (isOAuth) {
+-                    throw new Error(`Authentication failed for "${resolvedProvider}". ` +
+-                        `Credentials may have expired or network is unavailable. ` +
+-                        `Run '/login ${resolvedProvider}' to re-authenticate.`);
++            const model = agent.state.model;
++            const currentModelUsesOAuth = !!(model && model.provider === resolvedProvider && modelRegistry.isUsingOAuth(model));
++            const storedCred = modelRegistry.authStorage.get(resolvedProvider);
++            const providerUsesOAuth = currentModelUsesOAuth || storedCred?.type === "oauth";
++            const hasStoredAuth = modelRegistry.authStorage.hasAuth(resolvedProvider);
++            const shouldRetry = providerUsesOAuth || hasStoredAuth;
++            const maxAttempts = shouldRetry ? 3 : 1;
++            let lastError = undefined;
++            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
++                try {
++                    const key = await modelRegistry.getApiKeyForProvider(resolvedProvider);
++                    if (key) {
++                        return key;
++                    }
++                    lastError = new Error(`Credentials for "${resolvedProvider}" are temporarily backed off or unavailable.`);
++                }
++                catch (error) {
++                    lastError = error;
+                 }
+-                throw new Error(`No API key found for "${resolvedProvider}". ` +
+-                    `Set an API key environment variable or run '/login ${resolvedProvider}'.`);
++                if (attempt >= maxAttempts || !shouldRetry || !isTransientCredentialError(lastError)) {
++                    break;
++                }
++                await sleep(2000 * attempt);
++            }
++            if (providerUsesOAuth) {
++                throw new Error(`Authentication failed for "${resolvedProvider}". ` +
++                    `Credentials may have expired or network is unavailable. ` +
++                    `Run '/login ${resolvedProvider}' to re-authenticate.`);
++            }
++            if (hasStoredAuth && lastError) {
++                throw new Error(`Stored credentials for "${resolvedProvider}" are temporarily unavailable. ` +
++                    `Retry in a moment or run '/login ${resolvedProvider}' to refresh them.`);
+             }
+-            return key;
++            throw new Error(`No API key found for "${resolvedProvider}". ` +
++                `Set an API key environment variable or run '/login ${resolvedProvider}'.`);
+         },
+     });
+     // Restore messages if session has existing data
 diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/session-manager.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/session-manager.js
 index d0cdaf5..7ceb9cb 100644
 --- a/node_modules/@mariozechner/pi-coding-agent/dist/core/session-manager.js

@@ -1,3 +1,31 @@
+diff --git a/node_modules/@mariozechner/pi-tui/dist/components/markdown.js b/node_modules/@mariozechner/pi-tui/dist/components/markdown.js
+index 23eacac..348ad2f 100644
+--- a/node_modules/@mariozechner/pi-tui/dist/components/markdown.js
++++ b/node_modules/@mariozechner/pi-tui/dist/components/markdown.js
+@@ -1,6 +1,6 @@
+ import { marked } from "marked";
+ import { isImageLine } from "../terminal-image.js";
+-import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.js";
++import { applyBackgroundToLine, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils.js";
+ export class Markdown {
+     text;
+     paddingX; // Left/right padding
+@@ -63,7 +63,14 @@ export class Markdown {
+                 wrappedLines.push(line);
+             }
+             else {
+-                wrappedLines.push(...wrapTextWithAnsi(line, contentWidth));
++                for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
++                    if (visibleWidth(wrappedLine) > contentWidth) {
++                        wrappedLines.push(truncateToWidth(wrappedLine, contentWidth, ""));
++                    }
++                    else {
++                        wrappedLines.push(wrappedLine);
++                    }
++                }
+             }
+         }
+         // Add margins and background to each wrapped line
 diff --git a/node_modules/@mariozechner/pi-tui/dist/terminal.js b/node_modules/@mariozechner/pi-tui/dist/terminal.js
 index cd20330..e836fcd 100644
 --- a/node_modules/@mariozechner/pi-tui/dist/terminal.js

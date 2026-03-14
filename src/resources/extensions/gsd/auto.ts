@@ -41,7 +41,13 @@ import {
 } from "./paths.js";
 import { saveActivityLog } from "./activity-log.js";
 import { synthesizeCrashRecovery, getDeepDiagnostic } from "./session-forensics.js";
-import { writeLock, clearLock, readCrashLock, formatCrashInfo } from "./crash-recovery.js";
+import {
+  writeLock,
+  clearLock,
+  readCrashLock,
+  formatCrashInfo,
+  isLockProcessAlive,
+} from "./crash-recovery.js";
 import {
   clearUnitRuntimeRecord,
   formatExecuteTaskRecoveryStatus,
@@ -170,6 +176,7 @@ let wrapupWarningHandle: ReturnType<typeof setTimeout> | null = null;
 let idleWatchdogHandle: ReturnType<typeof setInterval> | null = null;
 let dispatchInProgress = false;
 let dispatchQueued = false;
+let sigtermHandler: (() => void) | null = null;
 const MAX_RECOVERY_INJECTION_CHARS = 50_000;
 
 function traceHeadlessAuto(message: string): void {
@@ -262,6 +269,21 @@ function clearUnitTimeout(): void {
   }
 }
 
+function registerSigtermHandler(currentBasePath: string): void {
+  if (sigtermHandler) process.off("SIGTERM", sigtermHandler);
+  sigtermHandler = () => {
+    clearLock(currentBasePath);
+    process.exit(0);
+  };
+  process.on("SIGTERM", sigtermHandler);
+}
+
+function deregisterSigtermHandler(): void {
+  if (!sigtermHandler) return;
+  process.off("SIGTERM", sigtermHandler);
+  sigtermHandler = null;
+}
+
 function finalizeCurrentUnit(ctx: ExtensionContext): void {
   if (!currentUnit) return;
 
@@ -289,6 +311,7 @@ export async function stopAuto(ctx?: ExtensionContext, pi?: ExtensionAPI): Promi
   clearUnitTimeout();
   if (basePath) clearLock(basePath);
   clearSkillSnapshot();
+  deregisterSigtermHandler();
   if (basePath) {
     try {
       await rebuildState(basePath);
@@ -345,6 +368,7 @@ export async function pauseAuto(ctx?: ExtensionContext, _pi?: ExtensionAPI): Pro
   if (!active) return;
   clearUnitTimeout();
   if (basePath) clearLock(basePath);
+  deregisterSigtermHandler();
   active = false;
   paused = true;
   // Preserve: dispatch/recovery bookkeeping, currentUnit, basePath, verbose,
@@ -376,6 +400,50 @@ async function selfHealRuntimeRecords(base: string, ctx: ExtensionContext): Prom
     }
   } catch {
     // Non-fatal.
+  }
+}
+
+async function recoverPendingCompletedSliceMerges(
+  base: string,
+  ctx: Pick<ExtensionContext, "ui">,
+): Promise<boolean> {
+  const seenBranches = new Set<string>();
+
+  while (true) {
+    const pendingMerge = findPendingCompletedSliceMerge(base);
+    if (!pendingMerge || seenBranches.has(pendingMerge.branch)) return true;
+    seenBranches.add(pendingMerge.branch);
+
+    try {
+      switchToMain(base);
+      const mergeResult = mergeSliceToMain(
+        base,
+        pendingMerge.milestoneId,
+        pendingMerge.sliceId,
+        pendingMerge.sliceTitle,
+      );
+      ctx.ui.notify(
+        `Recovered pending merge ${mergeResult.branch} → ${mergeResult.targetBranch}.`,
+        "info",
+      );
+    } catch (error) {
+      runGit(base, ["merge", "--abort"], { allowFailure: true });
+      runGit(base, ["reset", "--hard", "HEAD"], { allowFailure: true });
+
+      if (error instanceof MergeConflictError) {
+        ctx.ui.notify(
+          `Pending merge conflict in ${error.conflictedFiles.length} file(s). Resolve manually and restart auto-mode.`,
+          "error",
+        );
+        return false;
+      }
+
+      ctx.ui.notify(
+        `Failed to recover pending merge ${pendingMerge.branch}: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+      return false;
+    }
   }
 }
 
@@ -539,6 +607,11 @@ export async function startAuto(
   const requestedStepMode = options?.step ?? false;
   traceHeadlessAuto(`startAuto enter paused=${paused} step=${requestedStepMode} base=${base}`);
 
+  if (active && !paused) {
+    ctx.ui.notify("Auto-mode is already running. Stop it before starting another session.", "warning");
+    return;
+  }
+
   // If resuming from paused state, just re-activate and dispatch next unit.
   // The conversation is still intact — no need to reinitialize everything.
   if (paused) {
@@ -552,6 +625,7 @@ export async function startAuto(
     unitRecoveryCount.clear();
     // Re-initialize metrics in case ledger was lost during pause
     if (!getLedger()) initMetrics(base);
+    registerSigtermHandler(base);
     ctx.ui.setStatus("gsd-auto", stepMode ? "next" : "auto");
     ctx.ui.setFooter(hideFooter);
     ctx.ui.notify(stepMode ? "Step-mode resumed." : "Auto-mode resumed.", "info");
@@ -599,6 +673,14 @@ export async function startAuto(
   // Check for crash from previous session
   const crashLock = readCrashLock(base);
   if (crashLock) {
+    if (crashLock.pid !== process.pid && isLockProcessAlive(crashLock)) {
+      ctx.ui.notify(
+        `Another auto-mode session (PID ${crashLock.pid}) appears to still be running. Stop it before starting a new session.`,
+        "error",
+      );
+      return;
+    }
+
     // Synthesize a rich recovery briefing from the surviving pi session file
     // (pi writes entries incrementally, so it contains every tool call up to the crash)
     const activityDir = join(gsdRoot(base), "activity");
@@ -619,6 +701,10 @@ export async function startAuto(
       );
     }
     clearLock(base);
+  }
+
+  if (!(await recoverPendingCompletedSliceMerges(base, ctx))) {
+    return;
   }
 
   const state = await deriveState(base);
@@ -660,6 +746,7 @@ export async function startAuto(
   currentUnit = null;
   currentMilestoneId = state.activeMilestone?.id ?? null;
   originalModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null;
+  registerSigtermHandler(base);
 
   // Initialize metrics — loads existing ledger from disk
   initMetrics(base);
@@ -3046,6 +3133,24 @@ export function verifyExpectedArtifact(unitType: string, unitId: string, base: s
     if (existsSync(resolveGitMetadataPath(base, "MERGE_HEAD"))) return false;
     if (existsSync(resolveGitMetadataPath(base, "SQUASH_MSG"))) return false;
     return true;
+  }
+  if (unitType === "complete-slice") {
+    const [mid, sid] = unitId.split("/");
+    if (!mid || !sid) return false;
+
+    const summaryPath = resolveSliceFile(base, mid, sid, "SUMMARY");
+    if (!summaryPath || !existsSync(summaryPath)) return false;
+
+    const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
+    if (!roadmapPath || !existsSync(roadmapPath)) return true;
+
+    try {
+      const roadmap = parseRoadmap(readFileSync(roadmapPath, "utf-8"));
+      const sliceEntry = roadmap.slices.find((slice) => slice.id === sid);
+      return sliceEntry?.done !== false;
+    } catch {
+      return true;
+    }
   }
 
   const absPath = resolveExpectedArtifactPath(unitType, unitId, base);

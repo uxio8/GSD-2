@@ -229,6 +229,37 @@ function createGitBase(): string {
   }
 }
 
+{
+  console.log("\n=== verifyExpectedArtifact: complete-slice requires roadmap checkbox when roadmap exists ===");
+  const base = createFixtureBase();
+  try {
+    const roadmapPath = join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md");
+    const summaryPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md");
+    writeFileSync(roadmapPath, [
+      "# M001: Demo",
+      "",
+      "## Slices",
+      "- [x] **S01: Slice One** `risk:low` `depends:[]`",
+      "  > Done",
+    ].join("\n") + "\n", "utf-8");
+    writeFileSync(summaryPath, "# S01 Summary\n", "utf-8");
+
+    assertEq(verifyExpectedArtifact("complete-slice", "M001/S01", base), true, "checked roadmap + summary verifies");
+
+    writeFileSync(roadmapPath, [
+      "# M001: Demo",
+      "",
+      "## Slices",
+      "- [ ] **S01: Slice One** `risk:low` `depends:[]`",
+      "  > Still open",
+    ].join("\n") + "\n", "utf-8");
+
+    assertEq(verifyExpectedArtifact("complete-slice", "M001/S01", base), false, "unchecked roadmap invalidates complete-slice");
+  } finally {
+    cleanup(base);
+  }
+}
+
 // ═══ skipExecuteTask ═════════════════════════════════════════════════════════
 
 {

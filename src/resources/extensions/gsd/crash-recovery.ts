@@ -73,6 +73,24 @@ export function readCrashLock(basePath: string): LockData | null {
   }
 }
 
+/**
+ * Best-effort liveness check for a lock owner process.
+ * Returns true when the OS still knows about the PID.
+ */
+export function isLockProcessAlive(lock: LockData): boolean {
+  if (!Number.isInteger(lock.pid) || lock.pid <= 0) return false;
+  try {
+    process.kill(lock.pid, 0);
+    return true;
+  } catch (error) {
+    const code = typeof error === "object" && error && "code" in error
+      ? String((error as { code?: unknown }).code ?? "")
+      : "";
+    if (code === "EPERM") return true;
+    return false;
+  }
+}
+
 /** Format crash info for display or injection into a prompt. */
 export function formatCrashInfo(lock: LockData): string {
   return [

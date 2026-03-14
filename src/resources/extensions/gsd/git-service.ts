@@ -366,6 +366,7 @@ export class GitServiceImpl {
     }
 
     this.autoCommit("pre-switch", current, [".gsd/"]);
+    this.discardRuntimeFilesBeforeCheckout();
     this.git(["checkout", branch]);
 
     if (!created) {
@@ -394,7 +395,15 @@ export class GitServiceImpl {
     if (current === integrationBranch) return;
 
     this.autoCommit("pre-switch", current, [".gsd/"]);
+    this.discardRuntimeFilesBeforeCheckout();
     this.git(["checkout", integrationBranch]);
+  }
+
+  private discardRuntimeFilesBeforeCheckout(): void {
+    for (const path of RUNTIME_EXCLUSION_PATHS) {
+      this.git(["checkout", "--", path], { allowFailure: true });
+      this.git(["clean", "-fdx", "--", path], { allowFailure: true });
+    }
   }
 
   createSnapshot(label: string): void {

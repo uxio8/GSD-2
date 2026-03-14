@@ -10,6 +10,7 @@ import { sep } from "node:path";
 
 import { parseRoadmap } from "./files.ts";
 import { GitServiceImpl, runGit } from "./git-service.ts";
+import { relMilestoneFile, relSliceFile } from "./paths.ts";
 import { loadEffectiveGSDPreferences } from "./preferences.ts";
 
 export interface MergeSliceResult {
@@ -140,13 +141,14 @@ export function findPendingCompletedSliceMerge(
   for (const branch of branches) {
     const parsed = parseSliceBranch(branch);
     if (!parsed) continue;
+    if (parsed.worktreeName) continue;
 
     const { milestoneId: mid, sliceId: sid } = parsed;
     if (milestoneId && mid !== milestoneId) continue;
     if (isAncestorBranch(basePath, branch, targetBranch)) continue;
 
-    const roadmapPath = `.gsd/milestones/${mid}/${mid}-ROADMAP.md`;
-    const summaryPath = `.gsd/milestones/${mid}/slices/${sid}/${sid}-SUMMARY.md`;
+    const roadmapPath = relMilestoneFile(basePath, mid, "ROADMAP");
+    const summaryPath = relSliceFile(basePath, mid, sid, "SUMMARY");
 
     const roadmapContent = readBranchFile(basePath, branch, roadmapPath);
     const summaryContent = readBranchFile(basePath, branch, summaryPath);

@@ -107,6 +107,66 @@ test("ensureSliceBranch preserves the current non-slice integration branch", (t)
   assert.equal(run("git branch --show-current", repo), "developer");
 });
 
+test("ensureSliceBranch discards tracked runtime files before checkout", (t) => {
+  const repo = createRepo();
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+
+  mkdirSync(join(repo, ".gsd"), { recursive: true });
+  writeFileSync(join(repo, ".gsd", "STATE.md"), "baseline\n", "utf-8");
+  run("git add .gsd/STATE.md", repo);
+  run("git commit -m 'chore: add tracked runtime file'", repo);
+
+  writeFileSync(join(repo, ".gsd", "STATE.md"), "dirty runtime\n", "utf-8");
+
+  const svc = new GitServiceImpl(repo);
+  svc.ensureSliceBranch("M001", "S01");
+
+  assert.equal(run("git branch --show-current", repo), "gsd/M001/S01");
+  assert.equal(run("git status --short", repo), "");
+  assert.equal(readFileSync(join(repo, ".gsd", "STATE.md"), "utf-8"), "baseline\n");
+});
+
+test("ensureSliceBranch discards untracked runtime files that would block checkout", (t) => {
+  const repo = createRepo();
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+
+  const svc = new GitServiceImpl(repo);
+  svc.ensureSliceBranch("M001", "S01");
+  mkdirSync(join(repo, ".gsd"), { recursive: true });
+  writeFileSync(join(repo, ".gsd", "STATE.md"), "slice runtime\n", "utf-8");
+  run("git add .gsd/STATE.md", repo);
+  run("git commit -m 'chore: track runtime on slice branch'", repo);
+
+  svc.switchToMain();
+  mkdirSync(join(repo, ".gsd"), { recursive: true });
+  writeFileSync(join(repo, ".gsd", "STATE.md"), "untracked blocker\n", "utf-8");
+
+  svc.ensureSliceBranch("M001", "S01");
+
+  assert.equal(run("git branch --show-current", repo), "gsd/M001/S01");
+  assert.equal(readFileSync(join(repo, ".gsd", "STATE.md"), "utf-8"), "slice runtime\n");
+});
+
+test("switchToMain discards tracked runtime files before checkout", (t) => {
+  const repo = createRepo();
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+
+  mkdirSync(join(repo, ".gsd"), { recursive: true });
+  writeFileSync(join(repo, ".gsd", "STATE.md"), "baseline\n", "utf-8");
+  run("git add .gsd/STATE.md", repo);
+  run("git commit -m 'chore: add tracked runtime file'", repo);
+
+  const svc = new GitServiceImpl(repo);
+  svc.ensureSliceBranch("M001", "S01");
+  writeFileSync(join(repo, ".gsd", "STATE.md"), "dirty runtime\n", "utf-8");
+
+  svc.switchToMain();
+
+  assert.equal(run("git branch --show-current", repo), "main");
+  assert.equal(run("git status --short", repo), "");
+  assert.equal(readFileSync(join(repo, ".gsd", "STATE.md"), "utf-8"), "baseline\n");
+});
+
 test("push_branches pushes newly created slice branches to origin when enabled", (t) => {
   const repo = createRepo();
   const remote = createBareRemote();
