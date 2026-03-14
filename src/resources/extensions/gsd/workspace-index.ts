@@ -11,6 +11,11 @@ import {
   resolveTasksDir,
 } from "./paths.ts";
 import { deriveState } from "./state.ts";
+import {
+  extractMilestoneIdPrefix,
+  milestoneIdSort,
+  stripMilestoneTitlePrefix,
+} from "./milestone-ids.js";
 import { type ValidationIssue, validateCompleteBoundary, validatePlanBoundary } from "./observability-validator.ts";
 import { detectWorktreeName, getSliceBranchName } from "./worktree.ts";
 
@@ -68,11 +73,8 @@ function findMilestoneIds(basePath: string): string[] {
   try {
     return readdirSync(milestonesDir(basePath), { withFileTypes: true })
       .filter(entry => entry.isDirectory())
-      .map(entry => {
-        const match = entry.name.match(/^(M\d+)/);
-        return match ? match[1] : entry.name;
-      })
-      .sort();
+      .map(entry => extractMilestoneIdPrefix(entry.name) ?? entry.name)
+      .sort(milestoneIdSort);
   } catch {
     return [];
   }
@@ -80,7 +82,7 @@ function findMilestoneIds(basePath: string): string[] {
 
 function titleFromRoadmapHeader(content: string, fallbackId: string): string {
   const roadmap = parseRoadmap(content);
-  return roadmap.title.replace(/^M\d+[^:]*:\s*/, "") || fallbackId;
+  return stripMilestoneTitlePrefix(roadmap.title) || fallbackId;
 }
 
 async function indexSlice(basePath: string, milestoneId: string, sliceId: string, fallbackTitle: string, done: boolean): Promise<WorkspaceSliceTarget> {

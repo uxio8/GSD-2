@@ -6,6 +6,11 @@
 import { promises as fs, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { milestonesDir, resolveMilestoneFile, relMilestoneFile } from './paths.js';
+import {
+  extractMilestoneIdPrefix,
+  milestoneIdSort,
+  normalizeMilestoneId,
+} from './milestone-ids.js';
 
 import type {
   Roadmap, RoadmapSliceEntry, BoundaryMapEntry, RiskLevel,
@@ -754,9 +759,10 @@ export function extractUatType(content: string): UatType | undefined {
 }
 
 /**
- * Extract the `depends_on` list from M00x-CONTEXT.md YAML frontmatter.
+ * Extract the `depends_on` list from milestone CONTEXT.md YAML frontmatter.
  * Returns [] when: content is null, no frontmatter block, field absent, or field is empty.
- * Normalizes each dep ID to uppercase (e.g. 'm001' → 'M001').
+ * Normalizes each dep ID to canonical milestone form (e.g. 'm001' → 'M001',
+ * 'm001-AbC123' → 'M001-abc123').
  */
 export function parseContextDependsOn(content: string | null): string[] {
   if (!content) return [];
@@ -765,14 +771,14 @@ export function parseContextDependsOn(content: string | null): string[] {
   const fm = parseFrontmatterMap(fmLines);
   const raw = fm['depends_on'];
   if (!Array.isArray(raw) || raw.length === 0) return [];
-  return (raw as string[]).map(s => String(s).toUpperCase().trim()).filter(Boolean);
+  return (raw as string[]).map(s => normalizeMilestoneId(String(s))).filter(Boolean);
 }
 
 /**
  * Inline the prior milestone's SUMMARY.md as context for the current milestone's planning prompt.
  * Returns null when: (1) `mid` is the first milestone, (2) prior milestone has no SUMMARY file.
  *
- * Scans the milestones directory using the same readdirSync + sort + M\d+ match pattern
+ * Scans the milestones directory using the same readdirSync + milestoneIdSort + canonical ID extraction
  * as findMilestoneIds in state.ts.
  */
 export async function inlinePriorMilestoneSummary(mid: string, base: string): Promise<string | null> {
@@ -781,11 +787,8 @@ export async function inlinePriorMilestoneSummary(mid: string, base: string): Pr
   try {
     sorted = readdirSync(dir, { withFileTypes: true })
       .filter(d => d.isDirectory())
-      .map(d => {
-        const match = d.name.match(/^(M\d+)/);
-        return match ? match[1] : d.name;
-      })
-      .sort();
+      .map(d => extractMilestoneIdPrefix(d.name) ?? d.name)
+      .sort(milestoneIdSort);
   } catch {
     return null;
   }

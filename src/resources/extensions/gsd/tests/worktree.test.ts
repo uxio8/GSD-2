@@ -157,11 +157,18 @@ async function main(): Promise<void> {
   assertEq(namespaced?.worktreeName, "demo", "namespaced slice branch worktree parsed");
   assertEq(namespaced?.milestoneId, "M001", "namespaced slice branch milestone parsed");
   assertEq(namespaced?.sliceId, "S01", "namespaced slice branch slice parsed");
+
+  const unique = parseSliceBranch("gsd/demo/M001-abc123/S01");
+  assert(unique !== null, "unique milestone slice branch parses");
+  assertEq(unique?.worktreeName, "demo", "unique milestone branch keeps worktree name");
+  assertEq(unique?.milestoneId, "M001-abc123", "unique milestone branch milestone parsed");
+  assertEq(unique?.sliceId, "S01", "unique milestone branch slice parsed");
   assertEq(parseSliceBranch("main"), null, "non-slice branch does not parse");
 
   console.log("\n=== SLICE_BRANCH_RE ===");
   assert(SLICE_BRANCH_RE.test("gsd/M001/S01"), "regex matches plain slice branch");
   assert(SLICE_BRANCH_RE.test("gsd/demo/M001/S01"), "regex matches namespaced slice branch");
+  assert(SLICE_BRANCH_RE.test("gsd/demo/M001-abc123/S01"), "regex matches unique milestone slice branch");
   assert(!SLICE_BRANCH_RE.test("worktree/demo"), "regex rejects non-slice worktree branch");
 
   console.log("\n=== detectWorktreeName ===");

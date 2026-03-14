@@ -56,6 +56,7 @@ import {
   relSliceFile, relSlicePath, relTaskFile,
   buildSliceFileName, gsdRoot,
 } from "./paths.js";
+import { MILESTONE_ID_PATTERN } from "./milestone-ids.js";
 import { Key } from "@mariozechner/pi-tui";
 import { join } from "node:path";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -505,13 +506,17 @@ export default function (pi: ExtensionAPI) {
 }
 
 async function buildGuidedExecuteContextInjection(prompt: string, basePath: string): Promise<string | null> {
-  const executeMatch = prompt.match(/Execute the next task:\s+(T\d+)\s+\("([^"]+)"\)\s+in slice\s+(S\d+)\s+of milestone\s+(M\d+)/i);
+  const executeMatch = prompt.match(
+    new RegExp(`Execute the next task:\\s+(T\\d+)\\s+\\("([^"]+)"\\)\\s+in slice\\s+(S\\d+)\\s+of milestone\\s+(${MILESTONE_ID_PATTERN})`, "i"),
+  );
   if (executeMatch) {
     const [, taskId, taskTitle, sliceId, milestoneId] = executeMatch;
     return buildTaskExecutionContextInjection(basePath, milestoneId, sliceId, taskId, taskTitle);
   }
 
-  const resumeMatch = prompt.match(/Resume interrupted work\.[\s\S]*?slice\s+(S\d+)\s+of milestone\s+(M\d+)/i);
+  const resumeMatch = prompt.match(
+    new RegExp(`Resume interrupted work\\.[\\s\\S]*?slice\\s+(S\\d+)\\s+of milestone\\s+(${MILESTONE_ID_PATTERN})`, "i"),
+  );
   if (resumeMatch) {
     const [, sliceId, milestoneId] = resumeMatch;
     const state = await deriveState(basePath);

@@ -18,6 +18,12 @@ import {
   resolveSliceFile, resolveSlicePath, resolveGsdRootFile, relGsdRootFile,
   relMilestoneFile, relSliceFile, relSlicePath,
 } from "./paths.js";
+import { loadEffectiveGSDPreferences } from "./preferences.js";
+import {
+  extractMilestoneIdPrefix,
+  milestoneIdSort,
+  nextMilestoneId,
+} from "./milestone-ids.js";
 import { join } from "node:path";
 import { readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { execSync } from "node:child_process";
@@ -95,11 +101,8 @@ function findMilestoneIds(basePath: string): string[] {
   try {
     return readdirSync(dir, { withFileTypes: true })
       .filter((d) => d.isDirectory())
-      .map((d) => {
-        const match = d.name.match(/^(M\d+)/);
-        return match ? match[1] : d.name;
-      })
-      .sort();
+      .map((d) => extractMilestoneIdPrefix(d.name) ?? d.name)
+      .sort(milestoneIdSort);
   } catch {
     return [];
   }
@@ -146,12 +149,9 @@ export async function showQueue(
   const existingContext = await buildExistingMilestonesContext(basePath, milestoneIds, state);
 
   // ── Determine next milestone ID ─────────────────────────────────────
-  const maxNum = milestoneIds.reduce((max, id) => {
-    const num = parseInt(id.replace(/^M/, ""), 10);
-    return num > max ? num : max;
-  }, 0);
-  const nextId = `M${String(maxNum + 1).padStart(3, "0")}`;
-  const nextIdPlus1 = `M${String(maxNum + 2).padStart(3, "0")}`;
+  const uniqueEnabled = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
+  const nextId = nextMilestoneId(milestoneIds, uniqueEnabled);
+  const nextIdPlus1 = nextMilestoneId([...milestoneIds, nextId], uniqueEnabled);
 
   // ── Build preamble ──────────────────────────────────────────────────
   const activePart = state.activeMilestone
@@ -499,7 +499,10 @@ export async function showSmartEntry(
     }
 
     const milestoneIds = findMilestoneIds(basePath);
-    const nextId = `M${String(milestoneIds.length + 1).padStart(3, "0")}`;
+    const nextId = nextMilestoneId(
+      milestoneIds,
+      !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids,
+    );
     const isFirst = milestoneIds.length === 0;
 
     if (isFirst) {
@@ -561,7 +564,10 @@ export async function showSmartEntry(
 
     if (choice === "new_milestone") {
       const milestoneIds = findMilestoneIds(basePath);
-      const nextId = `M${String(milestoneIds.length + 1).padStart(3, "0")}`;
+      const nextId = nextMilestoneId(
+        milestoneIds,
+        !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids,
+      );
 
       pendingAutoStart = { ctx, pi, basePath, milestoneId: nextId, step: stepMode };
       dispatchWorkflow(pi, buildDiscussPrompt(nextId,

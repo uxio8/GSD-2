@@ -10,6 +10,7 @@ import { sep } from "node:path";
 
 import { parseRoadmap } from "./files.ts";
 import { GitServiceImpl, runGit } from "./git-service.ts";
+import { MILESTONE_ID_PATTERN } from "./milestone-ids.js";
 import { relMilestoneFile, relSliceFile } from "./paths.ts";
 import { loadEffectiveGSDPreferences } from "./preferences.ts";
 
@@ -56,7 +57,7 @@ export function getSliceBranchName(milestoneId: string, sliceId: string, worktre
   return `gsd/${milestoneId}/${sliceId}`;
 }
 
-export const SLICE_BRANCH_RE = /^gsd\/(?:([a-zA-Z0-9_-]+)\/)?(M\d+)\/(S\d+)$/;
+export const SLICE_BRANCH_RE = new RegExp(`^gsd/(?:([a-zA-Z0-9_-]+)/)?(${MILESTONE_ID_PATTERN})/(S\\d+)$`);
 
 export function parseSliceBranch(branchName: string): {
   worktreeName: string | null;

@@ -127,6 +127,7 @@ custom_instructions: []
 models: {}
 skill_discovery: {}
 auto_supervisor: {}
+unique_milestone_ids:
 ---
 
 # GSD Skill Preferences
@@ -145,6 +146,7 @@ See \`~/.gsd/agent/extensions/gsd/docs/preferences-reference.md\` for full field
 - \`models\`: Model preferences for specific task types
 - \`skill_discovery\`: Automatic skill detection preferences
 - \`auto_supervisor\`: Supervision and gating rules for autonomous modes
+- \`unique_milestone_ids\`: Generate milestone IDs like \`M001-abc123\` to avoid collisions across parallel worktrees
 
 ## Examples
 
@@ -164,4 +166,3 @@ custom_instructions:
   writeFileSync(preferencesPath, template, "utf-8");
   return true;
 }
-

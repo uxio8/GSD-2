@@ -30,6 +30,11 @@ import {
   resolveGsdRootFile,
 } from './paths.ts';
 import { getActiveSliceBranch } from './worktree.ts';
+import {
+  extractMilestoneIdPrefix,
+  milestoneIdSort,
+  stripMilestoneTitlePrefix,
+} from './milestone-ids.js';
 
 import { readdirSync, statSync } from 'fs';
 import { join } from 'path';
@@ -61,11 +66,8 @@ function findMilestoneIds(basePath: string): string[] {
   try {
     return readdirSync(dir, { withFileTypes: true })
       .filter(d => d.isDirectory())
-      .map(d => {
-        const match = d.name.match(/^(M\d+)/);
-        return match ? match[1] : d.name;
-      })
-      .sort();
+      .map(d => extractMilestoneIdPrefix(d.name) ?? d.name)
+      .sort(milestoneIdSort);
   } catch {
     return [];
   }
@@ -190,7 +192,7 @@ export async function deriveState(basePath: string): Promise<GSDState> {
     if (summaryFile) overallProgress.milestones.done++;
 
     const roadmap = parseRoadmap(content);
-    const title = roadmap.title.replace(/^M\d+[^:]*:\s*/, '');
+    const title = stripMilestoneTitlePrefix(roadmap.title);
     const complete = isMilestoneComplete(roadmap);
 
     overallProgress.slices.total += roadmap.slices.length;

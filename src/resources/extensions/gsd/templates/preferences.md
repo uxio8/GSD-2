@@ -8,6 +8,7 @@ custom_instructions: []
 models: {}
 skill_discovery:
 auto_supervisor: {}
+unique_milestone_ids:
 secrets:
   proactive_collect:
 git:
