@@ -14,7 +14,7 @@ index 51cdae9..d718c68 100644
  export function getDebugLogPath() {
      return join(getAgentDir(), `${APP_NAME}-debug.log`);
 diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
-index 90622c2..e1c24ef 100644
+index 90622c2..7a97428 100644
 --- a/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
 @@ -627,7 +627,7 @@ export class AgentSession {
@@ -141,7 +141,35 @@ index 90622c2..e1c24ef 100644
          this._retryAttempt++;
          if (this._retryAttempt > settings.maxRetries) {
              // Max retries exceeded, emit final failure and reset
-@@ -2216,7 +2254,7 @@ export class AgentSession {
+@@ -1849,7 +1887,26 @@ export class AgentSession {
+             this._resolveRetry(); // Resolve so waitForRetry() completes
+             return false;
+         }
+-        const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
++        const exponentialDelayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
++        let delayMs;
++        if (message.retryAfterMs !== undefined) {
++            const cap = settings.maxDelayMs > 0 ? settings.maxDelayMs : Infinity;
++            if (message.retryAfterMs > cap) {
++                this._emit({
++                    type: "auto_retry_end",
++                    success: false,
++                    attempt: this._retryAttempt - 1,
++                    finalError: `Rate limit reset in ${Math.ceil(message.retryAfterMs / 1000)}s (max: ${Math.ceil(cap / 1000)}s). ${message.errorMessage || ""}`.trim(),
++                });
++                this._retryAttempt = 0;
++                this._resolveRetry();
++                return false;
++            }
++            delayMs = message.retryAfterMs;
++        }
++        else {
++            delayMs = exponentialDelayMs;
++        }
+         this._emit({
+             type: "auto_retry_start",
+             attempt: this._retryAttempt,
+@@ -2216,7 +2273,7 @@ export class AgentSession {
          let summaryDetails;
          if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
              const model = this.model;
@@ -1298,3 +1326,45 @@ index 50ed291..7784228 100644
  export { SettingsManager, } from "./core/settings-manager.js";
  // Skills
  export { formatSkillsForPrompt, loadSkills, loadSkillsFromDir, } from "./core/skills.js";
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/modes/interactive/components/keybinding-hints.js b/node_modules/@mariozechner/pi-coding-agent/dist/modes/interactive/components/keybinding-hints.js
+index a319594..bcba2de 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/modes/interactive/components/keybinding-hints.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/modes/interactive/components/keybinding-hints.js
+@@ -3,6 +3,12 @@
+  */
+ import { getEditorKeybindings } from "@mariozechner/pi-tui";
+ import { theme } from "../theme/theme.js";
++const isMac = process.platform === "darwin";
++export function formatKeyForDisplay(key) {
++    if (!isMac)
++        return key;
++    return key.replace(/\balt\+/gi, "⌥");
++}
+ /**
+  * Format keys array as display string (e.g., ["ctrl+c", "escape"] -> "ctrl+c/escape").
+  */
+@@ -10,8 +16,8 @@ function formatKeys(keys) {
+     if (keys.length === 0)
+         return "";
+     if (keys.length === 1)
+-        return keys[0];
+-    return keys.join("/");
++        return formatKeyForDisplay(keys[0]);
++    return keys.map(formatKeyForDisplay).join("/");
+ }
+ /**
+  * Get display string for an editor action.
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/modes/interactive/components/tool-execution.js b/node_modules/@mariozechner/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
+index 2950aaa..de89aee 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/modes/interactive/components/tool-execution.js
+@@ -523,7 +523,8 @@ export class ToolExecutionComponent extends Container {
+             }
+             text = `${theme.fg("toolTitle", theme.bold("read"))} ${pathDisplay}`;
+             if (this.result) {
+-                const output = this.getTextOutput();
++                const rawOutput = this.getTextOutput();
++                const output = rawOutput.replace(/^(\s*)\d+#[ZPMQVRWSNKTXJBYH]{2}:/gm, "$1");
+                 const rawPath = str(this.args?.file_path ?? this.args?.path);
+                 const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
+                 const lines = lang ? highlightCode(replaceTabs(output), lang) : output.split("\n");

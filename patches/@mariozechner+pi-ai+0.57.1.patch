@@ -1,0 +1,77 @@
+diff --git a/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js b/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js
+index 6abaaa9..6f7888b 100644
+--- a/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js
++++ b/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js
+@@ -112,6 +112,47 @@ function mergeHeaders(...headerSources) {
+     }
+     return merged;
+ }
++export function extractRetryAfterMs(headers, errorText = "") {
++    const normalizeDelay = (ms) => (ms > 0 ? Math.ceil(ms + 1000) : undefined);
++    const retryAfter = headers.get("retry-after");
++    if (retryAfter) {
++        const seconds = Number(retryAfter);
++        if (Number.isFinite(seconds)) {
++            const delay = normalizeDelay(seconds * 1000);
++            if (delay !== undefined)
++                return delay;
++        }
++        else {
++            const targetTime = Date.parse(retryAfter);
++            if (Number.isFinite(targetTime)) {
++                const delay = normalizeDelay(targetTime - Date.now());
++                if (delay !== undefined)
++                    return delay;
++            }
++        }
++    }
++    for (const header of ["x-ratelimit-reset-requests", "x-ratelimit-reset-tokens"]) {
++        const value = headers.get(header);
++        if (value) {
++            const resetSeconds = Number(value);
++            if (Number.isFinite(resetSeconds)) {
++                const delay = normalizeDelay(resetSeconds * 1000 - Date.now());
++                if (delay !== undefined)
++                    return delay;
++            }
++        }
++    }
++    const match = errorText.match(/retry(?:ing)?(?: in)?\s+(\d+(?:\.\d+)?)s\b/i);
++    if (match) {
++        const seconds = Number(match[1]);
++        if (Number.isFinite(seconds)) {
++            const delay = normalizeDelay(seconds * 1000);
++            if (delay !== undefined)
++                return delay;
++        }
++    }
++    return undefined;
++}
+ export const streamAnthropic = (model, context, options) => {
+     const stream = new AssistantMessageEventStream();
+     (async () => {
+@@ -331,6 +372,12 @@ export const streamAnthropic = (model, context, options) => {
+                 delete block.index;
+             output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+             output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
++            if (error instanceof Anthropic.APIError && error.headers) {
++                const retryAfterMs = extractRetryAfterMs(error.headers, error.message);
++                if (retryAfterMs !== undefined) {
++                    output.retryAfterMs = retryAfterMs;
++                }
++            }
+             stream.push({ type: "error", reason: output.stopReason, error: output });
+             stream.end();
+         }
+diff --git a/node_modules/@mariozechner/pi-ai/dist/types.d.ts b/node_modules/@mariozechner/pi-ai/dist/types.d.ts
+index 9814f16..9ae8267 100644
+--- a/node_modules/@mariozechner/pi-ai/dist/types.d.ts
++++ b/node_modules/@mariozechner/pi-ai/dist/types.d.ts
+@@ -128,6 +128,7 @@ export interface AssistantMessage {
+     usage: Usage;
+     stopReason: StopReason;
+     errorMessage?: string;
++    retryAfterMs?: number;
+     timestamp: number;
+ }
+ export interface ToolResultMessage<TDetails = any> {

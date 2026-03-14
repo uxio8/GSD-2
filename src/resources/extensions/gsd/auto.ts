@@ -1060,7 +1060,7 @@ function updateProgressWidget(
 
         const hintParts: string[] = [];
         hintParts.push("esc pause");
-        hintParts.push("Ctrl+Alt+G dashboard");
+        hintParts.push(process.platform === "darwin" ? "⌃⌥G dashboard" : "Ctrl+Alt+G dashboard");
         lines.push(...ui.hints(hintParts));
 
         lines.push(...ui.bar());
