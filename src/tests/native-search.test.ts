@@ -56,9 +56,13 @@ function createMockPI() {
   return pi;
 }
 
-test("injects native web_search into Claude payloads", async () => {
+test("injects native web_search only when the active provider is Anthropic", async () => {
   const pi = createMockPI();
   registerNativeSearchHooks(pi);
+  await pi.fire("model_select", {
+    model: { provider: "anthropic", name: "claude-sonnet-4-6" },
+    source: "set",
+  });
 
   const payload: Record<string, unknown> = {
     model: "claude-sonnet-4-6-20250514",
@@ -74,12 +78,16 @@ test("injects native web_search into Claude payloads", async () => {
   );
 });
 
-test("does not inject native search for non-Claude models", async () => {
+test("does not inject native search for Claude-named models served by non-Anthropic providers", async () => {
   const pi = createMockPI();
   registerNativeSearchHooks(pi);
+  await pi.fire("model_select", {
+    model: { provider: "github-copilot", name: "claude-sonnet-4-6" },
+    source: "set",
+  });
 
   const payload: Record<string, unknown> = {
-    model: "gpt-5.4",
+    model: "claude-sonnet-4-6-20250514",
     tools: [{ name: "bash", type: "custom" }],
   };
 
@@ -95,6 +103,10 @@ test("removes Brave-backed tools from Claude payload when BRAVE_API_KEY is absen
   try {
     const pi = createMockPI();
     registerNativeSearchHooks(pi);
+    await pi.fire("model_select", {
+      model: { provider: "anthropic", name: "claude-opus-4-6" },
+      source: "set",
+    });
 
     const payload: Record<string, unknown> = {
       model: "claude-opus-4-6-20250514",

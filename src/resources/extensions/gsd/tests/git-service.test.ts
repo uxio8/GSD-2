@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execSync } from "node:child_process";
 
-import { GitServiceImpl, inferCommitType } from "../git-service.ts";
+import { GitServiceImpl, MergeConflictError, inferCommitType } from "../git-service.ts";
 
 function run(command: string, cwd: string): string {
   return execSync(command, {
@@ -165,7 +165,7 @@ test("mergeSliceToMain creates snapshot, rich commit message, and auto-pushes ma
   assert.match(remoteMain, /fix\(M001\/S01\): Repair search flow/);
 });
 
-test("mergeSliceToMain resets conflicted squash merges back to a clean tree", (t) => {
+test("mergeSliceToMain leaves non-runtime conflicts in place for fix-merge handling", (t) => {
   const repo = createRepo();
   t.after(() => rmSync(repo, { recursive: true, force: true }));
 
@@ -187,13 +187,46 @@ test("mergeSliceToMain resets conflicted squash merges back to a clean tree", (t
 
   assert.throws(
     () => svc.mergeSliceToMain("M001", "S01", "Conflicting merge"),
-    /Working tree has been reset to a clean state/,
+    (error: unknown) => {
+      assert.equal(error instanceof MergeConflictError, true);
+      assert.deepEqual((error as MergeConflictError).conflictedFiles, ["shared.txt"]);
+      return true;
+    },
   );
 
-  assert.equal(run("git status --short", repo), "");
-  assert.equal(readFileSync(join(repo, "shared.txt"), "utf-8"), "main change\n");
+  assert.match(run("git status --short", repo), /UU shared\.txt/);
+  assert.equal(readFileSync(join(repo, "shared.txt"), "utf-8").includes("<<<<<<<"), true);
   assert.equal(run("git branch --show-current", repo), "main");
   assert.match(run("git branch --list gsd/M001/S01", repo), /gsd\/M001\/S01/);
+});
+
+test("mergeSliceToMain auto-resolves runtime-only conflicts on .gsd files", (t) => {
+  const repo = createRepo();
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+
+  mkdirSync(join(repo, ".gsd"), { recursive: true });
+  writeFileSync(join(repo, ".gsd", "STATE.md"), "main baseline\n", "utf-8");
+  run("git add .gsd/STATE.md", repo);
+  run("git commit -m 'chore: add tracked runtime file'", repo);
+
+  const svc = new GitServiceImpl(repo, { pre_merge_check: false });
+
+  svc.ensureSliceBranch("M001", "S01");
+  writeFileSync(join(repo, ".gsd", "STATE.md"), "slice runtime\n", "utf-8");
+  run("git add .gsd/STATE.md", repo);
+  run("git commit -m 'chore: change runtime on slice'", repo);
+
+  svc.switchToMain();
+  writeFileSync(join(repo, ".gsd", "STATE.md"), "main runtime\n", "utf-8");
+  run("git add .gsd/STATE.md", repo);
+  run("git commit -m 'chore: change runtime on main'", repo);
+
+  const result = svc.mergeSliceToMain("M001", "S01", "Runtime-only merge");
+
+  assert.equal(result.deletedBranch, true);
+  assert.equal(run("git diff --name-only --diff-filter=U", repo), "");
+  assert.equal(run("git branch --show-current", repo), "main");
+  assert.equal(run("git ls-files .gsd/STATE.md", repo), "");
 });
 
 test("runPreMergeCheck supports passing and failing custom commands", () => {

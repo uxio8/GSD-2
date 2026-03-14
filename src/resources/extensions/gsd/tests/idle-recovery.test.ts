@@ -1,8 +1,10 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execSync } from "node:child_process";
 import {
   resolveExpectedArtifactPath,
+  verifyExpectedArtifact,
   writeBlockerPlaceholder,
   skipExecuteTask,
 } from "../auto.ts";
@@ -167,6 +169,62 @@ function cleanup(base: string): void {
     const result = writeBlockerPlaceholder("execute-task", "M001/S01/T01", base, "test");
     assertEq(result, null, "execute-task has no single artifact path, returns null");
   } finally {
+    cleanup(base);
+  }
+}
+
+function createGitBase(): string {
+  const base = mkdtempSync(join(tmpdir(), "gsd-fixmerge-test-"));
+  execSync("git init -b main", { cwd: base, stdio: "ignore" });
+  execSync("git config user.email test@test.com", { cwd: base, stdio: "ignore" });
+  execSync("git config user.name Test", { cwd: base, stdio: "ignore" });
+  writeFileSync(join(base, "README.md"), "init\n", "utf-8");
+  execSync("git add -A && git commit -m init", { cwd: base, stdio: "ignore" });
+  return base;
+}
+
+{
+  console.log("\n=== verifyExpectedArtifact: fix-merge clean repo ===");
+  const base = createGitBase();
+  try {
+    assertEq(verifyExpectedArtifact("fix-merge", "M001/S01", base), true, "clean repo verifies");
+  } finally {
+    cleanup(base);
+  }
+}
+
+{
+  console.log("\n=== verifyExpectedArtifact: fix-merge pending squash metadata ===");
+  const base = createGitBase();
+  try {
+    writeFileSync(join(base, ".git", "SQUASH_MSG"), "pending squash\n", "utf-8");
+    assertEq(verifyExpectedArtifact("fix-merge", "M001/S01", base), false, "pending squash invalidates artifact");
+  } finally {
+    cleanup(base);
+  }
+}
+
+{
+  console.log("\n=== verifyExpectedArtifact: fix-merge unresolved conflicts ===");
+  const base = createGitBase();
+  try {
+    writeFileSync(join(base, "conflict.txt"), "main\n", "utf-8");
+    execSync("git add conflict.txt && git commit -m 'main conflict file'", { cwd: base, stdio: "ignore" });
+    execSync("git checkout -b feature", { cwd: base, stdio: "ignore" });
+    writeFileSync(join(base, "conflict.txt"), "feature\n", "utf-8");
+    execSync("git add conflict.txt && git commit -m 'feature change'", { cwd: base, stdio: "ignore" });
+    execSync("git checkout main", { cwd: base, stdio: "ignore" });
+    writeFileSync(join(base, "conflict.txt"), "diverged main\n", "utf-8");
+    execSync("git add conflict.txt && git commit -m 'main diverged'", { cwd: base, stdio: "ignore" });
+    try {
+      execSync("git merge feature", { cwd: base, stdio: "ignore" });
+    } catch {
+      // expected
+    }
+
+    assertEq(verifyExpectedArtifact("fix-merge", "M001/S01", base), false, "unmerged files invalidate artifact");
+  } finally {
+    execSync("git reset --hard HEAD", { cwd: base, stdio: "ignore" });
     cleanup(base);
   }
 }

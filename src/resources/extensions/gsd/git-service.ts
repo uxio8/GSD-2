@@ -7,7 +7,7 @@
  */
 
 import { execFileSync, execSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
 import {
@@ -37,6 +37,29 @@ export interface MergeSliceResult {
   branch: string;
   mergedCommitMessage: string;
   deletedBranch: boolean;
+}
+
+export class MergeConflictError extends Error {
+  readonly conflictedFiles: string[];
+  readonly strategy: "squash";
+  readonly branch: string;
+  readonly mainBranch: string;
+
+  constructor(
+    conflictedFiles: string[],
+    branch: string,
+    mainBranch: string,
+  ) {
+    super(
+      `Squash-merge of "${branch}" into "${mainBranch}" failed with conflicts in `
+      + `${conflictedFiles.length} non-runtime file(s): ${conflictedFiles.join(", ")}`,
+    );
+    this.name = "MergeConflictError";
+    this.conflictedFiles = conflictedFiles;
+    this.strategy = "squash";
+    this.branch = branch;
+    this.mainBranch = mainBranch;
+  }
 }
 
 export interface PreMergeCheckResult {
@@ -84,6 +107,18 @@ const COMMIT_TYPE_RULES: [string[], string][] = [
   [["test", "tests", "testing"], "test"],
   [["chore", "cleanup", "clean up", "archive", "remove", "delete"], "chore"],
 ];
+
+function normalizeRuntimeExclusionPath(path: string): string {
+  return path.replace(/\/+$/, "");
+}
+
+function isRuntimeConflictPath(path: string): boolean {
+  const normalized = normalizeRuntimeExclusionPath(path);
+  return RUNTIME_EXCLUSION_PATHS.some((exclusion) => {
+    const normalizedExclusion = normalizeRuntimeExclusionPath(exclusion);
+    return normalized === normalizedExclusion || normalized.startsWith(`${normalizedExclusion}/`);
+  });
+}
 
 export class GitServiceImpl {
   readonly basePath: string;
@@ -247,6 +282,52 @@ export class GitServiceImpl {
     } catch {
       return false;
     }
+  }
+
+  private untrackRuntimeFilesBeforeMerge(): void {
+    const trackedRuntimeFiles = this.git(["ls-files", "--", ...RUNTIME_EXCLUSION_PATHS.map(normalizeRuntimeExclusionPath)], { allowFailure: true })
+      .split("\n")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+
+    for (const exclusion of RUNTIME_EXCLUSION_PATHS) {
+      const normalized = normalizeRuntimeExclusionPath(exclusion);
+      this.git(["rm", "--cached", "-r", "--ignore-unmatch", "--", normalized], { allowFailure: true });
+    }
+
+    const staged = this.git(["diff", "--cached", "--stat"], { allowFailure: true });
+    if (!staged) return;
+
+    this.git(["commit", "-m", "chore: untrack .gsd runtime files before merge"], { allowFailure: true });
+
+    for (const file of trackedRuntimeFiles) {
+      const absolute = join(this.basePath, file);
+      if (!existsSync(absolute)) continue;
+      rmSync(absolute, { recursive: true, force: true });
+    }
+  }
+
+  private listUnmergedFiles(): string[] {
+    const conflicted = this.git(["diff", "--name-only", "--diff-filter=U"], { allowFailure: true });
+    if (!conflicted) return [];
+    return conflicted.split("\n").map((entry) => entry.trim()).filter(Boolean);
+  }
+
+  private autoResolveRuntimeConflicts(conflictedFiles: readonly string[]): boolean {
+    if (conflictedFiles.length === 0 || !conflictedFiles.every(isRuntimeConflictPath)) {
+      return false;
+    }
+
+    for (const file of conflictedFiles) {
+      this.git(["checkout", "--ours", "--", file], { allowFailure: true });
+      this.git(["rm", "--cached", "--ignore-unmatch", "--", file], { allowFailure: true });
+      const absolute = join(this.basePath, file);
+      if (existsSync(absolute)) {
+        rmSync(absolute, { recursive: true, force: true });
+      }
+    }
+    this.git(["add", "-A"], { allowFailure: true });
+    return true;
   }
 
   ensureSliceBranch(milestoneId: string, sliceId: string): boolean {
@@ -441,6 +522,7 @@ export class GitServiceImpl {
     }
 
     this.createSnapshot(branch);
+    this.untrackRuntimeFilesBeforeMerge();
 
     const commitType = this.prefs.commit_type ?? inferCommitType(sliceTitle);
     const message = this.buildRichCommitMessage(
@@ -455,14 +537,21 @@ export class GitServiceImpl {
     try {
       this.git(["merge", "--squash", branch]);
     } catch (mergeError) {
-      this.git(["reset", "--hard", "HEAD"], { allowFailure: true });
-      const message = mergeError instanceof Error ? mergeError.message : String(mergeError);
-      throw new Error(
-        `Squash-merge of "${branch}" into "${mainBranch}" failed with conflicts. `
-        + `Working tree has been reset to a clean state. `
-        + `Resolve manually: git checkout ${mainBranch} && git merge --squash ${branch}\n`
-        + `Original error: ${message}`,
-      );
+      const conflictedFiles = this.listUnmergedFiles();
+      if (conflictedFiles.length > 0) {
+        if (!this.autoResolveRuntimeConflicts(conflictedFiles)) {
+          throw new MergeConflictError(conflictedFiles, branch, mainBranch);
+        }
+      } else {
+        this.git(["reset", "--hard", "HEAD"], { allowFailure: true });
+        const message = mergeError instanceof Error ? mergeError.message : String(mergeError);
+        throw new Error(
+          `Squash-merge of "${branch}" into "${mainBranch}" failed. `
+          + `Working tree has been reset to a clean state. `
+          + `Resolve manually: git checkout ${mainBranch} && git merge --squash ${branch}\n`
+          + `Original error: ${message}`,
+        );
+      }
     }
 
     const checkResult = this.runPreMergeCheck();
@@ -473,10 +562,15 @@ export class GitServiceImpl {
       throw new Error(`Pre-merge check failed${cmdInfo}. Merge aborted.${errInfo}`);
     }
 
-    this.git(["commit", "-F", "-"], { input: message });
+    const staged = this.git(["diff", "--cached", "--stat"], { allowFailure: true });
+    if (staged) {
+      this.git(["commit", "-F", "-"], { input: message });
+    } else {
+      this.git(["reset"], { allowFailure: true });
+    }
     this.git(["branch", "-D", branch]);
 
-    if (this.prefs.auto_push === true) {
+    if (staged && this.prefs.auto_push === true) {
       this.push(mainBranch);
     }
 

@@ -71,18 +71,21 @@ import {
   initMetrics, resetMetrics, snapshotUnitMetrics, getLedger,
   getProjectTotals, formatCost, formatTokenCount,
 } from "./metrics.js";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { appendFileSync, readdirSync, readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { execFileSync, execSync } from "node:child_process";
 import {
   autoCommitCurrentBranch,
+  detectWorktreeName,
   ensureSliceBranch,
   getCurrentBranch,
+  getSliceBranchName,
   switchToMain,
   mergeSliceToMain,
   findPendingCompletedSliceMerge,
   parseSliceBranch,
 } from "./worktree.ts";
+import { MergeConflictError, runGit } from "./git-service.ts";
 import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import { makeUI, GLYPH, INDENT } from "../shared/ui.js";
 import { showNextAction } from "../shared/next-action-ui.js";
@@ -259,11 +262,40 @@ function clearUnitTimeout(): void {
   }
 }
 
+function finalizeCurrentUnit(ctx: ExtensionContext): void {
+  if (!currentUnit) return;
+
+  const modelId = ctx.model?.id ?? "unknown";
+  snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
+  saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
+
+  const closeoutKey = `${currentUnit.type}/${currentUnit.id}`;
+  persistCompletedKey(basePath, closeoutKey);
+  completedKeySet.add(closeoutKey);
+
+  completedUnits.push({
+    type: currentUnit.type,
+    id: currentUnit.id,
+    startedAt: currentUnit.startedAt,
+    finishedAt: Date.now(),
+  });
+  clearUnitRuntimeRecord(basePath, currentUnit.type, currentUnit.id);
+  unitDispatchCount.delete(closeoutKey);
+  unitRecoveryCount.delete(closeoutKey);
+}
+
 export async function stopAuto(ctx?: ExtensionContext, pi?: ExtensionAPI): Promise<void> {
   if (!active && !paused) return;
   clearUnitTimeout();
   if (basePath) clearLock(basePath);
   clearSkillSnapshot();
+  if (basePath) {
+    try {
+      await rebuildState(basePath);
+    } catch {
+      // Non-fatal.
+    }
+  }
 
   // Show final cost summary before resetting
   const ledger = getLedger();
@@ -347,30 +379,90 @@ async function selfHealRuntimeRecords(base: string, ctx: ExtensionContext): Prom
   }
 }
 
-function findConfiguredModel(allModels: Model[], modelId: string): Model | undefined {
-  return allModels.find((model) => `${model.provider}/${model.id}` === modelId)
-    ?? allModels.find((model) => model.id === modelId);
+function parsePreferredModelRef(
+  modelId: string,
+  availableProviders: ReadonlySet<string>,
+): { provider?: string; id: string } {
+  const slashIndex = modelId.indexOf("/");
+  if (slashIndex <= 0) return { id: modelId };
+
+  const provider = modelId.slice(0, slashIndex);
+  const id = modelId.slice(slashIndex + 1);
+  if (!provider || !id || !availableProviders.has(provider)) {
+    return { id: modelId };
+  }
+
+  return { provider, id };
+}
+
+function findConfiguredModel(
+  allModels: Model[],
+  modelId: string,
+  preferredProvider?: string,
+): { model?: Model; ambiguousProviders: string[] } {
+  const providers = new Set(allModels.map((model) => model.provider));
+  const preferredRef = parsePreferredModelRef(modelId, providers);
+
+  if (preferredRef.provider) {
+    return {
+      model: allModels.find(
+        (model) => model.provider === preferredRef.provider && model.id === preferredRef.id,
+      ),
+      ambiguousProviders: [],
+    };
+  }
+
+  const matches = allModels.filter((model) => model.id === modelId);
+  if (matches.length === 0) return { model: undefined, ambiguousProviders: [] };
+  if (preferredProvider) {
+    const preferredMatch = matches.find((model) => model.provider === preferredProvider);
+    if (preferredMatch) {
+      return {
+        model: preferredMatch,
+        ambiguousProviders: matches
+          .map((model) => model.provider)
+          .filter((provider) => provider !== preferredProvider),
+      };
+    }
+  }
+
+  return {
+    model: matches[0],
+    ambiguousProviders: matches.slice(1).map((model) => model.provider),
+  };
 }
 
 export async function applyPreferredModelForUnit(
-  ctx: Pick<ExtensionContext, "modelRegistry" | "ui">,
+  ctx: Pick<ExtensionContext, "modelRegistry" | "ui" | "model">,
   pi: Pick<ExtensionAPI, "setModel">,
   unitType: string,
 ): Promise<void> {
   const modelConfig = resolveModelWithFallbacksForUnit(unitType);
   if (!modelConfig) return;
 
-  const allModels = ctx.modelRegistry.getAll();
+  const allModels = typeof ctx.modelRegistry.getAvailable === "function"
+    ? ctx.modelRegistry.getAvailable()
+    : ctx.modelRegistry.getAll();
   const modelsToTry = [modelConfig.primary, ...modelConfig.fallbacks];
   const attemptedModels: string[] = [];
+  const currentProvider = ctx.model?.provider;
 
   for (let i = 0; i < modelsToTry.length; i++) {
     const modelId = modelsToTry[i];
     attemptedModels.push(modelId);
-    const model = findConfiguredModel(allModels, modelId);
+    const { model, ambiguousProviders } = findConfiguredModel(allModels, modelId, currentProvider);
     if (!model) {
       ctx.ui.notify(`Model ${modelId} not found in registry, trying fallback.`, "warning");
       continue;
+    }
+    if (ambiguousProviders.length > 0) {
+      const suffix = currentProvider && ambiguousProviders.length > 0
+        ? ` Preferring current provider ${currentProvider}.`
+        : "";
+      ctx.ui.notify(
+        `Model ${modelId} is available from multiple providers (${[model.provider, ...ambiguousProviders].join(", ")}). Using ${model.provider}.${suffix}`,
+        "warning",
+      );
     }
 
     const ok = await pi.setModel(model, { persist: false });
@@ -420,6 +512,21 @@ export async function maybeCollectProactiveSecrets(
 
   ctx.ui.notify(summary.join(", ") + ".", result.errors.length > 0 ? "warning" : "info");
   return result;
+}
+
+async function maybeCollectSecretsBeforeDispatch(
+  ctx: Pick<ExtensionContext, "ui" | "hasUI">,
+  pi: Pick<ExtensionAPI, "exec">,
+  milestoneId: string,
+): Promise<void> {
+  try {
+    await maybeCollectProactiveSecrets(basePath, milestoneId, ctx, pi);
+  } catch (error) {
+    ctx.ui.notify(
+      `Secrets collection error: ${error instanceof Error ? error.message : String(error)}`,
+      "warning",
+    );
+  }
 }
 
 export async function startAuto(
@@ -572,14 +679,7 @@ export async function startAuto(
   ctx.ui.notify(`${modeLabel} started. ${scopeMsg}`, "info");
 
   if (state.activeMilestone?.id) {
-    try {
-      await maybeCollectProactiveSecrets(base, state.activeMilestone.id, ctx, pi);
-    } catch (error) {
-      ctx.ui.notify(
-        `Secrets collection error: ${error instanceof Error ? error.message : String(error)}`,
-        "warning",
-      );
-    }
+    await maybeCollectSecretsBeforeDispatch(ctx, pi, state.activeMilestone.id);
   }
 
   await selfHealRuntimeRecords(base, ctx);
@@ -743,6 +843,7 @@ function unitVerb(unitType: string): string {
     case "replan-slice": return "replanning";
     case "reassess-roadmap": return "reassessing";
     case "run-uat": return "running UAT";
+    case "fix-merge": return "resolving conflicts";
     default: return unitType;
   }
 }
@@ -758,6 +859,7 @@ function unitPhaseLabel(unitType: string): string {
     case "replan-slice": return "REPLAN";
     case "reassess-roadmap": return "REASSESS";
     case "run-uat": return "UAT";
+    case "fix-merge": return "MERGE-FIX";
     default: return unitType.toUpperCase();
   }
 }
@@ -774,6 +876,7 @@ function peekNext(unitType: string, state: GSDState): string {
     case "replan-slice": return `re-execute ${sid}`;
     case "reassess-roadmap": return "advance to next slice";
     case "run-uat": return "reassess roadmap";
+    case "fix-merge": return "continue merge";
     default: return "";
   }
 }
@@ -1043,7 +1146,6 @@ function getRoadmapSlicesSync(): { done: number; total: number; activeSliceTasks
 
 async function cleanupConflictedMergeState(ctx: ExtensionContext): Promise<boolean> {
   try {
-    const { runGit } = await import("./git-service.ts");
     const status = runGit(basePath, ["status", "--porcelain"], { allowFailure: true });
     if (!status) return false;
 
@@ -1129,6 +1231,56 @@ async function dispatchNextUnitInner(
   }
 
   {
+    const mergeHeadPath = resolveGitMetadataPath(basePath, "MERGE_HEAD");
+    const squashMsgPath = resolveGitMetadataPath(basePath, "SQUASH_MSG");
+    const hasMergeHead = existsSync(mergeHeadPath);
+    const hasSquashMsg = existsSync(squashMsgPath);
+
+    if (hasMergeHead || hasSquashMsg) {
+      const unmerged = runGit(basePath, ["diff", "--name-only", "--diff-filter=U"], { allowFailure: true });
+      if (!unmerged || !unmerged.trim()) {
+        if (hasSquashMsg && !hasMergeHead) {
+          try {
+            runGit(basePath, ["commit", "--no-edit"], { allowFailure: false });
+            ctx.ui.notify("Fix-merge session succeeded — finalized squash commit.", "info");
+          } catch {
+            // Commit may already exist.
+          }
+        }
+
+        state = await deriveState(basePath);
+        mid = state.activeMilestone?.id;
+        midTitle = state.activeMilestone?.title;
+      } else {
+        runGit(basePath, ["reset", "--hard", "HEAD"], { allowFailure: true });
+        ctx.ui.notify(
+          "Fix-merge session failed to resolve all conflicts. Working tree reset. Fix conflicts manually and restart.",
+          "error",
+        );
+        if (currentUnit) {
+          const modelId = ctx.model?.id ?? "unknown";
+          snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
+          saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
+        }
+        await stopAuto(ctx, pi);
+        return;
+      }
+    }
+  }
+
+  if (currentUnit?.type === "fix-merge" && verifyExpectedArtifact("fix-merge", currentUnit.id, basePath)) {
+    const [fixMergeMilestoneId, fixMergeSliceId] = currentUnit.id.split("/");
+    if (fixMergeMilestoneId && fixMergeSliceId) {
+      const fixMergeBranch = getSliceBranchName(
+        fixMergeMilestoneId,
+        fixMergeSliceId,
+        detectWorktreeName(basePath),
+      );
+      runGit(basePath, ["branch", "-D", fixMergeBranch], { allowFailure: true });
+    }
+  }
+
+  {
     const currentBranch = getCurrentBranch(basePath);
     const parsedBranch = parseSliceBranch(currentBranch);
     if (parsedBranch) {
@@ -1151,6 +1303,42 @@ async function dispatchNextUnitInner(
             mid = state.activeMilestone?.id;
             midTitle = state.activeMilestone?.title;
           } catch (error) {
+            if (error instanceof MergeConflictError) {
+              const fixMergeUnitId = `${parsedBranch.milestoneId}/${parsedBranch.sliceId}`;
+              const fixMergePrompt = buildFixMergePrompt(error);
+              ctx.ui.notify(
+                `Merge conflict in ${error.conflictedFiles.length} file(s) — dispatching fix-merge session.`,
+                "warning",
+              );
+
+              finalizeCurrentUnit(ctx);
+              currentUnit = { type: "fix-merge", id: fixMergeUnitId, startedAt: Date.now() };
+              writeUnitRuntimeRecord(basePath, "fix-merge", fixMergeUnitId, currentUnit.startedAt, {
+                phase: "dispatched",
+                wrapupWarningSent: false,
+                timeoutAt: null,
+                lastProgressAt: currentUnit.startedAt,
+                progressCount: 0,
+                lastProgressKind: "dispatch",
+              });
+              updateProgressWidget(ctx, "fix-merge", fixMergeUnitId, state);
+
+              const result = await cmdCtx!.newSession();
+              if (result.cancelled) {
+                runGit(basePath, ["reset", "--hard", "HEAD"], { allowFailure: true });
+                await stopAuto(ctx, pi);
+                return;
+              }
+
+              const sessionFile = ctx.sessionManager.getSessionFile();
+              writeLock(basePath, "fix-merge", fixMergeUnitId, completedUnits.length, sessionFile);
+              pi.sendMessage(
+                { customType: "gsd-auto", content: fixMergePrompt, display: verbose },
+                { triggerTurn: true },
+              );
+              return;
+            }
+
             const message = error instanceof Error ? error.message : String(error);
             await cleanupConflictedMergeState(ctx);
             ctx.ui.notify(
@@ -1191,6 +1379,42 @@ async function dispatchNextUnitInner(
       midTitle = state.activeMilestone?.title;
       if (mid) currentMilestoneId = mid;
     } catch (error) {
+      if (error instanceof MergeConflictError) {
+        const fixMergeUnitId = `${pendingMerge.milestoneId}/${pendingMerge.sliceId}`;
+        const fixMergePrompt = buildFixMergePrompt(error);
+        ctx.ui.notify(
+          `Pending merge conflict in ${error.conflictedFiles.length} file(s) — dispatching fix-merge session.`,
+          "warning",
+        );
+
+        finalizeCurrentUnit(ctx);
+        currentUnit = { type: "fix-merge", id: fixMergeUnitId, startedAt: Date.now() };
+        writeUnitRuntimeRecord(basePath, "fix-merge", fixMergeUnitId, currentUnit.startedAt, {
+          phase: "dispatched",
+          wrapupWarningSent: false,
+          timeoutAt: null,
+          lastProgressAt: currentUnit.startedAt,
+          progressCount: 0,
+          lastProgressKind: "dispatch",
+        });
+        updateProgressWidget(ctx, "fix-merge", fixMergeUnitId, state);
+
+        const result = await cmdCtx!.newSession();
+        if (result.cancelled) {
+          runGit(basePath, ["reset", "--hard", "HEAD"], { allowFailure: true });
+          await stopAuto(ctx, pi);
+          return;
+        }
+
+        const sessionFile = ctx.sessionManager.getSessionFile();
+        writeLock(basePath, "fix-merge", fixMergeUnitId, completedUnits.length, sessionFile);
+        pi.sendMessage(
+          { customType: "gsd-auto", content: fixMergePrompt, display: verbose },
+          { triggerTurn: true },
+        );
+        return;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       await cleanupConflictedMergeState(ctx);
       ctx.ui.notify(
@@ -1205,6 +1429,8 @@ async function dispatchNextUnitInner(
       return;
     }
   }
+
+  await maybeCollectSecretsBeforeDispatch(ctx, pi, mid);
 
   // Determine next unit
   let unitType: string;
@@ -1300,7 +1526,7 @@ async function dispatchNextUnitInner(
       }
 
       const researchFile = resolveMilestoneFile(basePath, mid, "RESEARCH");
-      const hasResearch = !!(researchFile && await loadFile(researchFile));
+      const hasResearch = !!researchFile;
 
       if (!hasResearch) {
         unitType = "research-milestone";
@@ -1315,11 +1541,11 @@ async function dispatchNextUnitInner(
       const sid = state.activeSlice!.id;
       const sTitle = state.activeSlice!.title;
       const researchFile = resolveSliceFile(basePath, mid, sid, "RESEARCH");
-      const hasResearch = !!(researchFile && await loadFile(researchFile));
+      const hasResearch = !!researchFile;
 
       if (!hasResearch) {
         const milestoneResearchFile = resolveMilestoneFile(basePath, mid, "RESEARCH");
-        const hasMilestoneResearch = !!(milestoneResearchFile && await loadFile(milestoneResearchFile));
+        const hasMilestoneResearch = !!milestoneResearchFile;
         if (hasMilestoneResearch && sid === "S01") {
           unitType = "plan-slice";
           unitId = `${mid}/${sid}`;
@@ -1372,10 +1598,29 @@ async function dispatchNextUnitInner(
     let durableOnDisk = true;
     if (unitType === "execute-task") {
       const status = await inspectExecuteTaskDurability(basePath, unitId);
+      if (status?.summaryExists && !status.taskChecked) {
+        const [statusMid, statusSid, statusTid] = unitId.split("/");
+        if (statusMid && statusSid && statusTid && skipExecuteTask(
+          basePath,
+          statusMid,
+          statusSid,
+          statusTid,
+          status,
+          "execute-task summary existed without plan checkbox",
+          MAX_UNIT_DISPATCHES,
+        )) {
+          ctx.ui.notify(
+            `Self-repair: marked ${unitId} complete because the summary already existed on disk.`,
+            "info",
+          );
+          await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+          await dispatchNextUnit(ctx, pi);
+          return;
+        }
+      }
       durableOnDisk = !!status && status.summaryExists && status.taskChecked;
     } else {
-      const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
-      durableOnDisk = artifactPath ? existsSync(artifactPath) : true;
+      durableOnDisk = verifyExpectedArtifact(unitType, unitId, basePath);
     }
 
     if (!durableOnDisk) {
@@ -1395,6 +1640,29 @@ async function dispatchNextUnitInner(
 
   const dispatchKey = `${unitType}/${unitId}`;
   const prevCount = unitDispatchCount.get(dispatchKey) ?? 0;
+  if (unitType === "execute-task" && prevCount > 0) {
+    const status = await inspectExecuteTaskDurability(basePath, unitId);
+    if (status?.summaryExists && !status.taskChecked) {
+      const [statusMid, statusSid, statusTid] = unitId.split("/");
+      if (statusMid && statusSid && statusTid && skipExecuteTask(
+        basePath,
+        statusMid,
+        statusSid,
+        statusTid,
+        status,
+        "execute-task summary existed without plan checkbox",
+        MAX_UNIT_DISPATCHES,
+      )) {
+        ctx.ui.notify(
+          `Self-repair: checked ${unitId} in the plan because the summary was already present.`,
+          "info",
+        );
+        await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+        await dispatchNextUnit(ctx, pi);
+        return;
+      }
+    }
+  }
   if (prevCount >= MAX_UNIT_DISPATCHES) {
     if (currentUnit) {
       const modelId = ctx.model?.id ?? "unknown";
@@ -1419,25 +1687,7 @@ async function dispatchNextUnitInner(
 
   // Snapshot metrics + activity log for the PREVIOUS unit before we reassign.
   // The session still holds the previous unit's data (newSession hasn't fired yet).
-  if (currentUnit) {
-    const modelId = ctx.model?.id ?? "unknown";
-    snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
-    saveActivityLog(ctx, basePath, currentUnit.type, currentUnit.id);
-
-    const closeoutKey = `${currentUnit.type}/${currentUnit.id}`;
-    persistCompletedKey(basePath, closeoutKey);
-    completedKeySet.add(closeoutKey);
-
-    completedUnits.push({
-      type: currentUnit.type,
-      id: currentUnit.id,
-      startedAt: currentUnit.startedAt,
-      finishedAt: Date.now(),
-    });
-    clearUnitRuntimeRecord(basePath, currentUnit.type, currentUnit.id);
-    unitDispatchCount.delete(closeoutKey);
-    unitRecoveryCount.delete(closeoutKey);
-  }
+  finalizeCurrentUnit(ctx);
 
   currentUnit = { type: unitType, id: unitId, startedAt: Date.now() };
   traceHeadlessAuto(`dispatchNextUnit selected unit=${unitType}/${unitId}`);
@@ -2233,6 +2483,37 @@ async function buildReassessRoadmapPrompt(
   });
 }
 
+function buildFixMergePrompt(error: MergeConflictError): string {
+  const fileList = error.conflictedFiles.map((file) => `- \`${file}\``).join("\n");
+
+  return [
+    "# Fix Merge Conflicts",
+    "",
+    `A squash merge of \`${error.branch}\` into \`${error.mainBranch}\` produced conflicts in:`,
+    "",
+    fileList,
+    "",
+    "## Instructions",
+    "",
+    "1. Read each conflicted file listed above.",
+    "2. Resolve all conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`).",
+    "3. Stage the resolved files with `git add <file>`.",
+    "4. Run `git commit --no-edit` to finish the squash merge.",
+    "",
+    "## Rules",
+    "",
+    "- Do not run `git merge --abort` or `git reset`.",
+    "- Only edit the conflicted files listed above.",
+    "- Preserve the slice branch intent when uncertain.",
+    "",
+    "## Verification",
+    "",
+    "1. `git diff --name-only --diff-filter=U` returns empty.",
+    "2. No conflicted file still contains conflict markers.",
+    "3. `git status` is clean or only shows the deleted slice branch as expected.",
+  ].join("\n");
+}
+
 function extractSliceExecutionExcerpt(content: string | null, relPath: string): string {
   if (!content) {
     return [
@@ -2575,8 +2856,7 @@ async function recoverTimedOutUnit(
 
   // Check if the artifact already exists on disk — agent may have written it
   // without signaling completion.
-  const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
-  if (artifactPath && existsSync(artifactPath)) {
+  if (verifyExpectedArtifact(unitType, unitId, basePath)) {
     writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnit.startedAt, {
       phase: "finalized",
       recoveryAttempts: recoveryAttempts + 1,
@@ -2751,9 +3031,33 @@ export function resolveExpectedArtifactPath(unitType: string, unitId: string, ba
       const dir = resolveMilestonePath(base, mid);
       return dir ? join(dir, buildMilestoneFileName(mid, "SUMMARY")) : null;
     }
+    case "fix-merge":
+      return null;
     default:
       return null;
   }
+}
+
+export function verifyExpectedArtifact(unitType: string, unitId: string, base: string): boolean {
+  if (unitType === "replan-slice") return true;
+  if (unitType === "fix-merge") {
+    const unmerged = runGit(base, ["diff", "--name-only", "--diff-filter=U"], { allowFailure: true });
+    if (unmerged && unmerged.trim()) return false;
+    if (existsSync(resolveGitMetadataPath(base, "MERGE_HEAD"))) return false;
+    if (existsSync(resolveGitMetadataPath(base, "SQUASH_MSG"))) return false;
+    return true;
+  }
+
+  const absPath = resolveExpectedArtifactPath(unitType, unitId, base);
+  if (!absPath) return false;
+
+  return existsSync(absPath);
+}
+
+function resolveGitMetadataPath(base: string, fileName: string): string {
+  const gitDir = runGit(base, ["rev-parse", "--git-dir"], { allowFailure: true }) || ".git";
+  const absoluteGitDir = gitDir.startsWith("/") ? gitDir : resolve(base, gitDir);
+  return join(absoluteGitDir, fileName);
 }
 
 /**
@@ -2806,6 +3110,8 @@ function diagnoseExpectedArtifact(unitType: string, unitId: string, base: string
       return `${relSliceFile(base, mid!, sid!, "UAT-RESULT")} (UAT result)`;
     case "complete-milestone":
       return `${relMilestoneFile(base, mid!, "SUMMARY")} (milestone summary)`;
+    case "fix-merge":
+      return "clean git state with no unmerged files and no pending merge metadata";
     default:
       return null;
   }

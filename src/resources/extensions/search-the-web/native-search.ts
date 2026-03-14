@@ -60,10 +60,7 @@ export function registerNativeSearchHooks(pi: NativeSearchPI): { getIsAnthropic:
     const payload = event.payload as Record<string, unknown>;
     if (!payload) return;
 
-    const model = payload.model as string | undefined;
-    if (!model || !model.startsWith("claude")) return;
-
-    isAnthropicProvider = true;
+    if (!isAnthropicProvider) return;
 
     const messages = payload.messages as Array<Record<string, unknown>> | undefined;
     if (Array.isArray(messages)) {

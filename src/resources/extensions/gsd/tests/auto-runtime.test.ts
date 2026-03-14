@@ -45,7 +45,7 @@ test("applyPreferredModelForUnit falls back when the primary model fails", async
   await applyPreferredModelForUnit(
     {
       modelRegistry: {
-        getAll: () => [
+        getAvailable: () => [
           { provider: "anthropic", id: "claude-opus-4-6" },
           { provider: "openrouter", id: "z-ai/glm-5" },
         ],
@@ -69,7 +69,7 @@ test("applyPreferredModelForUnit falls back when the primary model fails", async
     applyPreferredModelForUnit(
       {
         modelRegistry: {
-          getAll: () => [
+          getAvailable: () => [
             { provider: "anthropic", id: "claude-opus-4-6" },
             { provider: "openrouter", id: "z-ai/glm-5" },
           ],
