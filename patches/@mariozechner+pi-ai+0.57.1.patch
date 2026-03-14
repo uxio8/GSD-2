@@ -55,7 +55,7 @@ index e4398f4..a92484a 100644
              id: "claude-sonnet-4-0",
              name: "Claude Sonnet 4 (latest)",
 diff --git a/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js b/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js
-index 6abaaa9..6f7888b 100644
+index 6abaaa9..085ec48 100644
 --- a/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js
 +++ b/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js
 @@ -112,6 +112,47 @@ function mergeHeaders(...headerSources) {
@@ -119,6 +119,20 @@ index 6abaaa9..6f7888b 100644
              stream.push({ type: "error", reason: output.stopReason, error: output });
              stream.end();
          }
+@@ -456,8 +503,12 @@ function createClient(model, apiKey, interleavedThinking, optionsHeaders, dynami
+ }
+ function buildParams(model, context, isOAuthToken, options) {
+     const { cacheControl } = getCacheControl(model.baseUrl, options?.cacheRetention);
++    // For OAuth (Claude Max/Pro), strip variant suffixes like [1m] from model ID.
++    // The API only accepts the base model ID (e.g. "claude-opus-4-6"),
++    // not internal variant identifiers (e.g. "claude-opus-4-6[1m]").
++    const apiModelId = isOAuthToken ? model.id.replace(/\[.*\]$/, "") : model.id;
+     const params = {
+-        model: model.id,
++        model: apiModelId,
+         messages: convertMessages(context.messages, model, isOAuthToken, cacheControl),
+         max_tokens: options?.maxTokens || (model.maxTokens / 3) | 0,
+         stream: true,
 diff --git a/node_modules/@mariozechner/pi-ai/dist/types.d.ts b/node_modules/@mariozechner/pi-ai/dist/types.d.ts
 index 9814f16..9ae8267 100644
 --- a/node_modules/@mariozechner/pi-ai/dist/types.d.ts
