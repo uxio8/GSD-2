@@ -1,8 +1,11 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { getAgentDir } from '@mariozechner/pi-coding-agent'
+import { deriveState } from './state.js'
+import { resolveTaskComplexity, type TaskComplexity } from './task-complexity.js'
 
 export type CodexSpeedMode = 'standard' | 'fast'
+export type CodexReasoningEffort = 'medium' | 'high' | 'xhigh'
 
 export interface CodexSpeedPaths {
   globalSettingsPath: string
@@ -23,6 +26,11 @@ interface OpenAICodexResponsesPayload {
   tool_choice: 'auto'
   parallel_tool_calls: true
   service_tier?: string
+  reasoning?: {
+    effort?: string | null
+    summary?: 'auto' | 'concise' | 'detailed' | null
+    generate_summary?: 'auto' | 'concise' | 'detailed' | null
+  } | null
 }
 
 const ENV_KEYS = [
@@ -104,6 +112,80 @@ export function applyCodexFastMode(
   }
 }
 
+export function shouldUseCodexReasoningEffort(
+  model: CodexSpeedModelRef | undefined,
+): boolean {
+  return !!model
+    && model.provider === 'openai-codex'
+    && model.id.startsWith('gpt-5')
+}
+
+export function mapTaskComplexityToCodexReasoningEffort(
+  complexity: TaskComplexity,
+  model: CodexSpeedModelRef | undefined,
+): CodexReasoningEffort {
+  switch (complexity) {
+    case 'alta':
+      return supportsCodexXHigh(model) ? 'xhigh' : 'high'
+    case 'media':
+      return 'high'
+    case 'simple':
+    default:
+      return 'medium'
+  }
+}
+
+export function applyCodexReasoningEffort(
+  payload: unknown,
+  model: CodexSpeedModelRef | undefined,
+  complexity: TaskComplexity | undefined,
+): unknown {
+  if (!complexity || !shouldUseCodexReasoningEffort(model)) {
+    return payload
+  }
+  if (!isOpenAICodexResponsesPayload(payload)) {
+    return payload
+  }
+
+  const effort = mapTaskComplexityToCodexReasoningEffort(complexity, model)
+  if (payload.reasoning?.effort === effort) {
+    return payload
+  }
+  if (payload.reasoning?.effort) {
+    return payload
+  }
+
+  return {
+    ...payload,
+    reasoning: {
+      ...(isRecord(payload.reasoning) ? payload.reasoning : {}),
+      effort,
+    },
+  }
+}
+
+export async function resolveActiveCodexTaskComplexity(
+  basePath: string = process.cwd(),
+): Promise<TaskComplexity | undefined> {
+  const state = await deriveState(basePath)
+  if (
+    state.phase !== 'executing'
+    || !state.activeMilestone
+    || !state.activeSlice
+    || !state.activeTask
+  ) {
+    return undefined
+  }
+
+  return resolveTaskComplexity(
+    basePath,
+    state.activeMilestone.id,
+    state.activeSlice.id,
+    state.activeTask.id,
+    state.activeTask.title,
+  )
+}
+
 function readCodexSpeedFromSettingsFile(path: string): CodexSpeedMode | undefined {
   if (!existsSync(path)) return undefined
 
@@ -113,6 +195,12 @@ function readCodexSpeedFromSettingsFile(path: string): CodexSpeedMode | undefine
   } catch {
     return undefined
   }
+}
+
+function supportsCodexXHigh(model: CodexSpeedModelRef | undefined): boolean {
+  return !!model
+    && model.provider === 'openai-codex'
+    && model.id.startsWith('gpt-5.4')
 }
 
 function readCodexSpeedFromSettings(value: unknown): CodexSpeedMode | undefined {

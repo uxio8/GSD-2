@@ -171,12 +171,13 @@ function getAuthStorage(): AuthStorage {
 
 function saveProviderToken(provider: string, token: string): void {
   const auth = getAuthStorage();
+  auth.remove(provider);
   auth.set(provider, { type: "api_key", key: token });
 }
 
 function removeProviderToken(provider: string): void {
   const auth = getAuthStorage();
-  auth.set(provider, { type: "api_key", key: "" });
+  auth.remove(provider);
 }
 
 function saveRemoteQuestionsConfig(channel: "slack" | "discord", channelId: string): void {

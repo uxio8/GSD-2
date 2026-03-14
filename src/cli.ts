@@ -17,6 +17,7 @@ import { getPiDefaultModelAndProvider, migratePiCredentials } from './pi-migrati
 import { loadProjectOptionalEnvKeys } from './project-env.js'
 import { buildResourceLoader, initResources } from './resource-loader.js'
 import { ensureManagedTools } from './tool-bootstrap.js'
+import { runUpdate } from './update-cmd.js'
 import { loadStoredEnvKeys, runWizardIfNeeded } from './wizard.js'
 import { runOnboarding, shouldRunOnboarding } from './onboarding.js'
 
@@ -30,6 +31,8 @@ function loadAppendSystemPrompt(pathOrText: string | undefined): string | undefi
 }
 
 const cliFlags = parseCliArgs(process.argv)
+const isPrintMode = cliFlags.print || cliFlags.mode !== undefined
+const interactiveSubcommand = !isPrintMode ? cliFlags.messages[0] : undefined
 
 if (cliFlags.version) {
   process.stdout.write(`${process.env.GSD_VERSION || '0.0.0'}\n`)
@@ -41,17 +44,16 @@ if (cliFlags.help) {
   process.exit(0)
 }
 
-const isPrintMode = cliFlags.print || cliFlags.mode !== undefined
+if (interactiveSubcommand === 'update') {
+  await runUpdate()
+  process.exit(process.exitCode ?? 0)
+}
+
 const interactiveCliError = getInteractiveCliError(isPrintMode, !!process.stdin.isTTY)
 
 if (interactiveCliError) {
   process.stderr.write(`${interactiveCliError}\n`)
   process.exit(1)
-}
-
-if (!isPrintMode && cliFlags.messages[0] === 'config') {
-  await runOnboarding(AuthStorage.create(authFilePath))
-  process.exit(0)
 }
 
 // Pi's tool bootstrap can mis-detect already-installed fd/rg on some systems
@@ -65,6 +67,15 @@ const cloudPoolSession = await prepareCloudPoolSession(cwd, authFilePath)
 const authStorage = cloudPoolSession.authStorage
 migratePiCredentials(authStorage)
 loadStoredEnvKeys(authStorage)
+
+if (!isPrintMode && interactiveSubcommand === 'config') {
+  await runOnboarding(authStorage, {
+    configMode: true,
+    managedLlmProviderLabel: cloudPoolSession.poolActive ? 'ChatGPT Codex (managed by cloud pool)' : null,
+  })
+  await cloudPoolSession.cleanup()
+  process.exit(process.exitCode ?? 0)
+}
 
 // Print/subagent mode has no TTY, so the setup wizard must stay disabled there.
 if (!isPrintMode) {

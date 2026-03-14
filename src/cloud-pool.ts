@@ -20,7 +20,7 @@ type OpenAICodexCredential = {
   accountId: string
 }
 
-interface PoolConfig {
+export interface CloudPoolConfig {
   apiUrl: string
   apiKey: string
   poolId: string
@@ -32,13 +32,13 @@ interface PoolConfig {
   excludedSessionIds: string[]
 }
 
-interface PoolAcquireResponse {
+export interface CloudPoolAcquireResponse {
   leaseId: string
   accountId: string | null
   sessionId: string | null
 }
 
-type PoolCompleteOutcome =
+export type CloudPoolCompleteOutcome =
   | 'succeeded'
   | 'failed'
   | 'cancelled'
@@ -202,7 +202,7 @@ function findDefaultPoolEnvFile(cwd: string): string | null {
   return null
 }
 
-function readPoolConfig(cwd: string): PoolConfig | null {
+export function readCloudPoolConfig(cwd: string): CloudPoolConfig | null {
   const envFilePath = findDefaultPoolEnvFile(cwd)
   const fileVars = envFilePath ? parseEnvFile(envFilePath) : {}
 
@@ -256,7 +256,7 @@ function readPoolConfig(cwd: string): PoolConfig | null {
 }
 
 async function poolRequest(
-  config: PoolConfig,
+  config: CloudPoolConfig,
   input: {
     path: string
     method?: 'GET' | 'POST'
@@ -433,7 +433,7 @@ export function createCloudPoolAuthStorage(
   )
 }
 
-function parseAcquireResponse(raw: unknown): PoolAcquireResponse {
+function parseAcquireResponse(raw: unknown): CloudPoolAcquireResponse {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw cloudPoolError('invalid acquire response from pool')
   }
@@ -449,7 +449,11 @@ function parseAcquireResponse(raw: unknown): PoolAcquireResponse {
   }
 }
 
-async function releaseLease(config: PoolConfig, leaseId: string, reason: string): Promise<void> {
+export async function releaseCloudPoolLease(
+  config: CloudPoolConfig,
+  leaseId: string,
+  reason: string,
+): Promise<void> {
   await poolRequest(config, {
     path: `/v1/leases/${encodeURIComponent(leaseId)}/release`,
     method: 'POST',
@@ -457,11 +461,11 @@ async function releaseLease(config: PoolConfig, leaseId: string, reason: string)
   })
 }
 
-async function completeLease(
-  config: PoolConfig,
+export async function completeCloudPoolLease(
+  config: CloudPoolConfig,
   leaseId: string,
   input: {
-    outcome: PoolCompleteOutcome
+    outcome: CloudPoolCompleteOutcome
     message?: string
     usageLimitRetryAt?: Date | null
   },
@@ -477,11 +481,59 @@ async function completeLease(
   })
 }
 
+export async function renewCloudPoolLease(
+  config: CloudPoolConfig,
+  leaseId: string,
+): Promise<void> {
+  await poolRequest(config, {
+    path: `/v1/leases/${encodeURIComponent(leaseId)}/renew`,
+    method: 'POST',
+  })
+}
+
+export async function fetchCloudPoolAuthSnapshotText(
+  config: CloudPoolConfig,
+  leaseId: string,
+): Promise<string> {
+  const snapshotResponse = await poolRequest(config, {
+    path: `/v1/leases/${encodeURIComponent(leaseId)}/auth-snapshot`,
+    parseAs: 'text',
+  })
+  return typeof snapshotResponse.body === 'string'
+    ? snapshotResponse.body
+    : JSON.stringify(snapshotResponse.body)
+}
+
+export async function acquireCloudPoolLease(
+  config: CloudPoolConfig,
+): Promise<CloudPoolAcquireResponse> {
+  const acquireBody: JsonRecord = {
+    clientInstanceId: config.clientInstanceId,
+    consumerType: config.consumerType,
+    consumerId: config.consumerId,
+    leaseTtlSec: config.leaseTtlSec,
+  }
+  if (config.pinnedSessionId) acquireBody.pinnedSessionId = config.pinnedSessionId
+  if (config.excludedSessionIds.length > 0) {
+    acquireBody.excludedSessionIds = config.excludedSessionIds
+  }
+
+  return parseAcquireResponse(
+    (
+      await poolRequest(config, {
+        path: `/v1/pools/${encodeURIComponent(config.poolId)}/leases/acquire`,
+        method: 'POST',
+        body: acquireBody,
+      })
+    ).body,
+  )
+}
+
 export async function prepareCloudPoolSession(
   cwd: string,
   authPath: string,
 ): Promise<PreparedCloudPoolSession> {
-  const config = readPoolConfig(cwd)
+  const config = readCloudPoolConfig(cwd)
   if (!config) {
     return {
       authStorage: AuthStorage.create(authPath),
@@ -492,49 +544,17 @@ export async function prepareCloudPoolSession(
     }
   }
 
-  const buildAcquireBody = (): JsonRecord => {
-    const acquireBody: JsonRecord = {
-      clientInstanceId: config.clientInstanceId,
-      consumerType: config.consumerType,
-      consumerId: config.consumerId,
-      leaseTtlSec: config.leaseTtlSec,
-    }
-    if (config.pinnedSessionId) acquireBody.pinnedSessionId = config.pinnedSessionId
-    if (config.excludedSessionIds.length > 0) {
-      acquireBody.excludedSessionIds = config.excludedSessionIds
-    }
-    return acquireBody
-  }
-
-  const acquireLease = async (): Promise<PoolAcquireResponse> =>
-    parseAcquireResponse(
-      (
-        await poolRequest(config, {
-          path: `/v1/pools/${encodeURIComponent(config.poolId)}/leases/acquire`,
-          method: 'POST',
-          body: buildAcquireBody(),
-        })
-      ).body,
-    )
-
   const readLeaseCredential = async (leaseId: string): Promise<OpenAICodexCredential> => {
-    const snapshotResponse = await poolRequest(config, {
-      path: `/v1/leases/${encodeURIComponent(leaseId)}/auth-snapshot`,
-      parseAs: 'text',
-    })
-    const snapshotText =
-      typeof snapshotResponse.body === 'string'
-        ? snapshotResponse.body
-        : JSON.stringify(snapshotResponse.body)
+    const snapshotText = await fetchCloudPoolAuthSnapshotText(config, leaseId)
     return buildPiOpenAICodexCredential(JSON.parse(snapshotText))
   }
 
-  let currentLease: PoolAcquireResponse | null = await acquireLease()
+  let currentLease: CloudPoolAcquireResponse | null = await acquireCloudPoolLease(config)
   let initialCredential: OpenAICodexCredential
   try {
     initialCredential = await readLeaseCredential(currentLease.leaseId)
   } catch (error) {
-    await releaseLease(config, currentLease.leaseId, 'gsd_auth_snapshot_failed').catch(() => {})
+    await releaseCloudPoolLease(config, currentLease.leaseId, 'gsd_auth_snapshot_failed').catch(() => {})
     throw error
   }
 
@@ -555,10 +575,7 @@ export async function prepareCloudPoolSession(
     renewTimer = setInterval(() => {
       const leaseId = currentLease?.leaseId
       if (!leaseId) return
-      void poolRequest(config, {
-        path: `/v1/leases/${encodeURIComponent(leaseId)}/renew`,
-        method: 'POST',
-      }).catch((error) => {
+      void renewCloudPoolLease(config, leaseId).catch((error) => {
         const message = error instanceof Error ? error.message : String(error)
         process.stderr.write(`[gsd] Cloud pool renew failed: ${message}\n`)
       })
@@ -576,7 +593,7 @@ export async function prepareCloudPoolSession(
 
       stopRenewTimer()
       try {
-        await completeLease(config, exhaustedLease.leaseId, {
+        await completeCloudPoolLease(config, exhaustedLease.leaseId, {
           outcome: 'usage_limited',
           message: signal.message,
           usageLimitRetryAt: signal.retryAt,
@@ -594,7 +611,7 @@ export async function prepareCloudPoolSession(
         )
       }
 
-      const nextLease = await acquireLease()
+      const nextLease = await acquireCloudPoolLease(config)
       const nextCredential = await readLeaseCredential(nextLease.leaseId)
       currentLease = nextLease
       authStorage.set('openai-codex', nextCredential)
@@ -615,7 +632,7 @@ export async function prepareCloudPoolSession(
     const leaseId = currentLease?.leaseId
     currentLease = null
     if (leaseId) {
-      await releaseLease(config, leaseId, 'gsd_exit').catch(() => {})
+      await releaseCloudPoolLease(config, leaseId, 'gsd_exit').catch(() => {})
     }
   }
 

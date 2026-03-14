@@ -7,6 +7,7 @@ const { deriveState } = await import(new URL("../src/resources/extensions/gsd/st
 const { indexWorkspace } = await import(new URL("../src/resources/extensions/gsd/workspace-index.ts", import.meta.url));
 const { loadFile, parseRoadmap, extractSection } = await import(new URL("../src/resources/extensions/gsd/files.ts", import.meta.url));
 const { resolveMilestoneFile } = await import(new URL("../src/resources/extensions/gsd/paths.ts", import.meta.url));
+const { classifyTaskComplexity } = await import(new URL("../src/resources/extensions/gsd/task-complexity.ts", import.meta.url));
 
 function readAutoLock(basePath) {
   const lockPath = join(basePath, ".gsd", "auto.lock");
@@ -29,39 +30,6 @@ function formatActiveRef(ref) {
 function formatOverallProgress(overall) {
   if (!overall) return null;
   return `${overall.tasks.done}/${overall.tasks.total} tasks · ${overall.slices.done}/${overall.slices.total} slices · ${overall.milestones.done}/${overall.milestones.total} milestones`;
-}
-
-function parseFrontmatterNumber(content, key) {
-  const match = content.match(new RegExp(`^${key}:\\s*(\\d+)\\s*$`, "m"));
-  return match ? Number.parseInt(match[1], 10) : null;
-}
-
-function sectionExists(content, heading) {
-  return extractSection(content, heading, 2) !== null;
-}
-
-function textSuggestsHigherReasoning(text) {
-  return /(browser|playwright|runtime|async|session|cross-host|integration|route|api|error path|webhook|stream|state|studio|preview|published|authority|observability|diagnostic)/i.test(text);
-}
-
-function classifyTaskComplexity({ taskTitle, taskPlanContent, sliceRisk }) {
-  const content = taskPlanContent ?? "";
-  const estimatedSteps = parseFrontmatterNumber(content, "estimated_steps");
-  const estimatedFiles = parseFrontmatterNumber(content, "estimated_files");
-  let score = 0;
-
-  if (sliceRisk === "high") score += 1.5;
-  else if (sliceRisk === "medium") score += 0.5;
-
-  if ((estimatedSteps ?? 0) >= 10 || (estimatedFiles ?? 0) >= 12) score += 2;
-  else if ((estimatedSteps ?? 0) >= 7 || (estimatedFiles ?? 0) >= 8) score += 1;
-
-  if (sectionExists(content, "Observability Impact")) score += 1;
-  if (textSuggestsHigherReasoning(`${taskTitle}\n${content}`)) score += 1;
-
-  if (score >= 3) return "alta";
-  if (score >= 1.5) return "media";
-  return "simple";
 }
 
 async function buildSliceRiskMap(basePath, milestones) {

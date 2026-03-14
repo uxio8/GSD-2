@@ -185,6 +185,65 @@ If you want Codex `gpt-5.4` to use OpenAI's fast mode by default, add this to `~
 
 GSD injects `service_tier: "fast"` only for `openai-codex/gpt-5.4*` requests backed by OAuth/ChatGPT login (including `codex-pool-cloud`). `standard`, `default`, or `auto` leave the request on the normal lane. You can override it per shell with `GSD_CODEX_SPEED=fast|standard` or `GSD_CODEX_SERVICE_TIER=fast|standard`.
 
+### Codex image generation through the pool
+
+GSD also ships a `codex_generate_image` tool for visual asset tasks. It runs a local `codex exec` sidecar under a temporary `CODEX_HOME`, authenticated from the same `codex-pool-cloud` lease flow described above.
+
+- Uses your Codex / ChatGPT plan through the pool. No OpenAI API key and no separate Responses API image call.
+- Stores generated assets inside the active project by default at `.gsd/generated-images/`.
+- Bundles its own `gsd-codex-image` skill, so there is no extra Codex skill install step.
+- Fails closed if `codex` is missing, the pool is unavailable, or all pooled accounts are exhausted.
+- Disabled by default in this build because the current Codex CLI lane used by GSD does not expose native `image_generation` here yet. Re-enable only after confirming support in your Codex session.
+
+Optional config files:
+
+- Global: `~/.gsd/agent/extensions/codex-image.json`
+- Project: `.gsd/extensions/codex-image.json`
+
+Example:
+
+```json
+{
+  "enabled": false,
+  "codexCommand": "codex",
+  "defaultOutputDir": ".gsd/generated-images",
+  "timeoutSec": 600
+}
+```
+
+### Google image generation through Gemini API
+
+GSD also ships a `google_generate_image` tool for visual asset tasks. It uses Google's official Gemini API through the already bundled `@google/genai` client.
+
+- Uses `GEMINI_API_KEY` from your shell or project `.env`.
+- Defaults to `gemini-3.1-flash-image-preview`.
+- Stores generated assets inside the active project by default at `.gsd/generated-images/`.
+- Returns the image inline to the agent and also saves it to disk.
+- Applies a small Nano Banana 2 prompt profile automatically: minimal thinking by default, high thinking for UI/layout/text-heavy prompts, and Google Search grounding only for real-world landmark/species style requests.
+- Supports extreme aspect ratios such as `4:1`, `1:4`, `8:1`, and `1:8`, plus `imageSize` values from fast `512px` iteration up to `4K`.
+
+Optional config files:
+
+- Global: `~/.gsd/agent/extensions/google-image.json`
+- Project: `.gsd/extensions/google-image.json`
+
+Example:
+
+```json
+{
+  "enabled": true,
+  "model": "gemini-3.1-flash-image-preview",
+  "defaultOutputDir": ".gsd/generated-images",
+  "timeoutSec": 120
+}
+```
+
+Practical defaults baked into the tool:
+
+- Start fast. The tool keeps thinking at `minimal` unless the prompt looks like UI, typography, or spatial-layout work.
+- Ground only when it helps. Real landmarks, species, and other factual subjects can trigger Google Search grounding automatically; person-centric prompts deliberately stay ungrounded.
+- Ask for text only when you really need it. If your prompt contains quoted copy, the tool will treat it as verbatim on-image text.
+
 ### Use it
 
 Open a terminal in your project and run:
@@ -358,7 +417,7 @@ budget_ceiling: 50.00
 
 ### Bundled Tools
 
-GSD ships with 9 extensions, all loaded automatically:
+GSD ships with 10 extensions, all loaded automatically:
 
 | Extension | What it provides |
 |-----------|-----------------|
@@ -367,6 +426,7 @@ GSD ships with 9 extensions, all loaded automatically:
 | **Search the Web** | Brave Search + Jina page extraction |
 | **Context7** | Up-to-date library/framework documentation |
 | **Background Shell** | Long-running process management with readiness detection |
+| **Codex Image** | One-shot image generation through local Codex + cloud pool leases |
 | **Subagent** | Delegated tasks with isolated context windows |
 | **Slash Commands** | Custom command creation |
 | **Ask User Questions** | Structured user input with single/multi-select |

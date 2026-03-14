@@ -57,6 +57,8 @@ export function formatCliHelp(version: string): string {
     '',
     'Usage:',
     '  gsd                               Interactive mode (TTY required)',
+    '  gsd config                        Update LLM, web search, and optional tool setup',
+    '  gsd update                        Update a supported global install from npm',
     '  gsd --print [message...]          Single-shot print mode',
     '  gsd --mode <text|json|rpc>        Non-interactive mode',
     '',

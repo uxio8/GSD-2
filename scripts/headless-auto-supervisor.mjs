@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { isTerminalState, parseStateSnapshot } from "./headless-auto-state.mjs";
+import { clearUsageLimitMarker, resolveUsageLimitWait } from "./headless-auto-usage-limit.mjs";
 
 const runnerScript = process.argv[2] ? resolve(process.argv[2]) : null;
 const projectPath = process.argv[3] ? resolve(process.argv[3]) : null;
@@ -108,6 +109,29 @@ function readStateSnapshot() {
 
 function isTerminalProjectState() {
   return isTerminalState(readStateSnapshot());
+}
+
+async function waitForUsageLimitWindow() {
+  let lastLoggedMinute = null;
+
+  while (!stopRequested) {
+    const wait = resolveUsageLimitWait(projectPath);
+    if (!wait) return;
+
+    if (wait.remainingMs <= 0) {
+      clearUsageLimitMarker(projectPath);
+      log(`usage-limit-window-open retry_at=${wait.retryAt.toISOString()}`);
+      return;
+    }
+
+    const remainingMinutes = Math.max(1, Math.ceil(wait.remainingMs / 60_000));
+    if (remainingMinutes !== lastLoggedMinute) {
+      lastLoggedMinute = remainingMinutes;
+      log(`usage-limit-wait until=${wait.retryAt.toISOString()} remaining_min=${remainingMinutes}`);
+    }
+
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, Math.min(checkIntervalMs, wait.remainingMs)));
+  }
 }
 
 function requestStop(signalName) {
@@ -230,6 +254,9 @@ async function main() {
   let startReason = "initial";
 
   while (!stopRequested) {
+    await waitForUsageLimitWindow();
+    if (stopRequested) break;
+
     if (isTerminalProjectState()) {
       log("terminal-state-detected before-start");
       break;

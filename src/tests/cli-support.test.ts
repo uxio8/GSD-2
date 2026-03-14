@@ -33,6 +33,8 @@ test("formatCliHelp documents rpc mode and tty requirement", () => {
   assert.match(help, /GSD v1\.2\.3/);
   assert.match(help, /--mode <text\|json\|rpc>/);
   assert.match(help, /Interactive mode \(TTY required\)/);
+  assert.match(help, /gsd config/);
+  assert.match(help, /gsd update/);
 });
 
 test("getInteractiveCliError only blocks non-print non-tty mode", () => {

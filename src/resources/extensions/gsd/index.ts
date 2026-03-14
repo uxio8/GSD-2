@@ -38,7 +38,13 @@ import { isAutoActive, isAutoPaused, handleAgentEnd, pauseAuto, getAutoDashboard
 import { saveActivityLog } from "./activity-log.js";
 import { checkAutoStartAfterDiscuss } from "./guided-flow.js";
 import { GSDDashboardOverlay } from "./dashboard-overlay.js";
-import { applyCodexFastMode, resolveCodexSpeed } from "./codex-speed.js";
+import {
+  applyCodexFastMode,
+  applyCodexReasoningEffort,
+  resolveActiveCodexTaskComplexity,
+  resolveCodexSpeed,
+  shouldUseCodexReasoningEffort,
+} from "./codex-speed.js";
 import {
   loadEffectiveGSDPreferences,
   renderPreferencesForSystemPrompt,
@@ -52,7 +58,7 @@ import {
 } from "./paths.js";
 import { Key } from "@mariozechner/pi-tui";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { Text } from "@mariozechner/pi-tui";
 import { shortcutDesc } from "../shared/terminal.js";
 import { exitGracefully, killImmediately } from "./exit.js";
@@ -66,6 +72,96 @@ const GSD_LOGO_LINES = [
   "  ╚██████╔╝███████║██████╔╝",
   "   ╚═════╝ ╚══════╝╚═════╝ ",
 ];
+
+const fallbackUsageLimitWaitMs = 30 * 60 * 1000;
+
+function parseUsageLimitDelay(message: string, unit: "second" | "minute" | "hour" | "day"): number | null {
+  const aliases: Record<typeof unit, string> = {
+    second: "seconds?|secs?|s",
+    minute: "minutes?|mins?|m",
+    hour: "hours?|hrs?|h",
+    day: "days?|d",
+  };
+  const match = message.match(new RegExp(`try again in\\s*~?(\\d+)\\s*(?:${aliases[unit]})\\b`, "i"));
+  if (!match) return null;
+  const amount = Number(match[1]);
+  return Number.isFinite(amount) && amount > 0 ? amount : null;
+}
+
+function parseUsageLimitClock(message: string, now: Date): Date | null {
+  const match = message.match(/try again at\s+(\d{1,2}):(\d{2})(?:\s*([ap]m))?/i);
+  if (!match) return null;
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const suffix = match[3]?.toLowerCase();
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute < 0 || minute > 59) return null;
+
+  if (suffix === "pm" && hour < 12) hour += 12;
+  if (suffix === "am" && hour === 12) hour = 0;
+  if (!suffix && hour > 23) return null;
+
+  const retryAt = new Date(now);
+  retryAt.setSeconds(0, 0);
+  retryAt.setHours(hour, minute, 0, 0);
+  if (retryAt.getTime() <= now.getTime()) retryAt.setDate(retryAt.getDate() + 1);
+  return retryAt;
+}
+
+function parseGSDUsageLimitSignal(message: string, now = new Date()): { message: string; retryAt: Date | null } | null {
+  const trimmed = typeof message === "string" ? message.trim() : "";
+  if (!trimmed) return null;
+
+  const normalized = trimmed.toLowerCase();
+  const looksLikeUsageLimit =
+    normalized.includes("chatgpt usage limit") ||
+    normalized.includes("hit your usage limit") ||
+    normalized.includes("you've hit your usage limit");
+
+  if (!looksLikeUsageLimit) return null;
+
+  const minutes = parseUsageLimitDelay(trimmed, "minute");
+  const hours = minutes == null ? parseUsageLimitDelay(trimmed, "hour") : null;
+  const days = minutes == null && hours == null ? parseUsageLimitDelay(trimmed, "day") : null;
+  const seconds =
+    minutes == null && hours == null && days == null ? parseUsageLimitDelay(trimmed, "second") : null;
+
+  let retryAt: Date | null = null;
+  if (minutes != null) retryAt = new Date(now.getTime() + minutes * 60_000);
+  else if (hours != null) retryAt = new Date(now.getTime() + hours * 60 * 60_000);
+  else if (days != null) retryAt = new Date(now.getTime() + days * 24 * 60 * 60_000);
+  else if (seconds != null) retryAt = new Date(now.getTime() + seconds * 1_000);
+  else retryAt = parseUsageLimitClock(trimmed, now);
+
+  return { message: trimmed, retryAt };
+}
+
+function persistUsageLimitPause(basePath: string, message: string, now = new Date()): Date | null {
+  const signal = parseGSDUsageLimitSignal(message, now);
+  if (!signal) return null;
+
+  const retryAt = signal.retryAt ?? new Date(now.getTime() + fallbackUsageLimitWaitMs);
+  mkdirSync(join(basePath, ".gsd"), { recursive: true });
+  writeFileSync(
+    join(basePath, ".gsd", "usage-limit.json"),
+    JSON.stringify({
+      detectedAt: now.toISOString(),
+      message: signal.message,
+      retryAt: retryAt.toISOString(),
+    }, null, 2),
+    "utf8",
+  );
+  return retryAt;
+}
+
+function formatUsageLimitResumeTime(retryAt: Date): string {
+  return retryAt.toLocaleString([], {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 export default function (pi: ExtensionAPI) {
   registerGSDCommand(pi);
@@ -290,13 +386,25 @@ export default function (pi: ExtensionAPI) {
 
   // ── before_provider_request: inject Codex fast mode when configured ─────
   pi.on("before_provider_request", async (event, ctx: ExtensionContext) => {
+    const modelRef = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+    const isOAuthCredential = !!ctx.model && ctx.modelRegistry.isUsingOAuth(ctx.model);
     const speed = resolveCodexSpeed(ctx.cwd);
-    return applyCodexFastMode(
+    let payload = applyCodexFastMode(
       event.payload,
-      ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined,
-      !!ctx.model && ctx.modelRegistry.isUsingOAuth(ctx.model),
+      modelRef,
+      isOAuthCredential,
       speed,
     );
+
+    if (shouldUseCodexReasoningEffort(modelRef)) {
+      payload = applyCodexReasoningEffort(
+        payload,
+        modelRef,
+        await resolveActiveCodexTaskComplexity(ctx.cwd),
+      );
+    }
+
+    return payload;
   });
 
   // ── agent_end: auto-mode advancement or auto-start after discuss ───────────
@@ -311,6 +419,24 @@ export default function (pi: ExtensionAPI) {
     // instead of advancing. This preserves the conversation so the user
     // can inspect what happened, interact with the agent, or resume.
     const lastMsg = event.messages[event.messages.length - 1];
+    if (
+      lastMsg &&
+      "stopReason" in lastMsg &&
+      lastMsg.stopReason === "error" &&
+      typeof lastMsg.errorMessage === "string" &&
+      process.env.GSD_CLOUD_POOL_ACTIVE !== "1"
+    ) {
+      const retryAt = persistUsageLimitPause(process.cwd(), lastMsg.errorMessage);
+      if (retryAt) {
+        await pauseAuto(ctx, pi);
+        ctx.ui.notify(
+          `Usage limit reached. Auto-mode paused until ${formatUsageLimitResumeTime(retryAt)}. Resume with /gsd auto after the window resets.`,
+          "warning",
+        );
+        return;
+      }
+    }
+
     if (lastMsg && "stopReason" in lastMsg && lastMsg.stopReason === "aborted") {
       await pauseAuto(ctx, pi);
       return;

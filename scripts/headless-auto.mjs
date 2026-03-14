@@ -8,11 +8,12 @@ import { appendFileSync, mkdirSync, readFileSync, existsSync, unlinkSync } from 
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentDir, sessionsDir, authFilePath } from "../dist/app-paths.js";
-import { prepareCloudPoolSession } from "../dist/cloud-pool.js";
+import { parseUsageLimitSignal, prepareCloudPoolSession } from "../dist/cloud-pool.js";
 import { buildResourceLoader, initResources } from "../dist/resource-loader.js";
 import { ensureManagedTools } from "../dist/tool-bootstrap.js";
 import { loadStoredEnvKeys } from "../dist/wizard.js";
 import { parseStateSnapshot, isTerminalState } from "./headless-auto-state.mjs";
+import { clearUsageLimitMarker, writeUsageLimitMarker } from "./headless-auto-usage-limit.mjs";
 
 const gsdRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cwd = process.argv[2] ? resolve(process.argv[2]) : process.cwd();
@@ -70,9 +71,13 @@ async function promptAuto(session, reason) {
       }),
     ]);
     markActivity();
+    pendingUsageLimitWait = null;
+    clearUsageLimitMarker(cwd);
     log(`auto-command complete reason=${reason}`);
     return true;
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await maybeHandleUsageLimit(message, "prompt");
     log(`auto-command failed reason=${reason}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
     return false;
   }
@@ -170,22 +175,43 @@ function extractText(content) {
 }
 
 function maybeRotateOnUsageLimit(errorMessage) {
-  if (!cloudPoolSession.poolActive) return;
-  if (!errorMessage) return;
-  if (usageLimitRotation) return;
+  void maybeHandleUsageLimit(errorMessage, "stream");
+}
 
-  usageLimitRotation = (async () => {
-    try {
-      const rotated = await cloudPoolSession.rotateOnUsageLimit(errorMessage);
-      if (!rotated) return;
-      pendingRelaunchReason = "usage-limit-rotate";
-      log("usage-limit-rotated");
-    } catch (error) {
-      log(`usage-limit-rotation-failed ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      usageLimitRotation = null;
+async function maybeHandleUsageLimit(errorMessage, source) {
+  const signal = parseUsageLimitSignal(errorMessage);
+  if (!signal) return false;
+  if (pendingUsageLimitWait) return true;
+  if (usageLimitHandling) return usageLimitHandling;
+
+  usageLimitHandling = (async () => {
+    if (cloudPoolSession.poolActive) {
+      try {
+        const rotated = await cloudPoolSession.rotateOnUsageLimit(errorMessage);
+        if (rotated) {
+          pendingUsageLimitWait = null;
+          clearUsageLimitMarker(cwd);
+          pendingRelaunchReason = "usage-limit-rotate";
+          log(`usage-limit-rotated source=${source}`);
+          return true;
+        }
+      } catch (error) {
+        log(`usage-limit-rotation-failed ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
+
+    const marker = writeUsageLimitMarker(cwd, signal);
+    pendingUsageLimitWait = marker;
+    pendingRelaunchReason = null;
+    log(`usage-limit-detected source=${source} retry_at=${marker.retryAt}`);
+    return true;
   })();
+
+  try {
+    return await usageLimitHandling;
+  } finally {
+    usageLimitHandling = null;
+  }
 }
 
 await ensureRuntimeEnv();
@@ -195,6 +221,7 @@ process.chdir(cwd);
 ensureManagedTools(join(agentDir, "bin"));
 
 const cloudPoolSession = await prepareCloudPoolSession(cwd, authFilePath);
+process.env.GSD_CLOUD_POOL_ACTIVE = cloudPoolSession.poolActive ? "1" : "0";
 const authStorage = cloudPoolSession.authStorage;
 loadStoredEnvKeys(authStorage);
 
@@ -210,7 +237,8 @@ const resourceLoader = buildResourceLoader(agentDir);
 await resourceLoader.reload();
 
 let pendingRelaunchReason = null;
-let usageLimitRotation = null;
+let pendingUsageLimitWait = null;
+let usageLimitHandling = null;
 const enabledModelPatterns = settingsManager.getEnabledModels();
 let contextLimitUnitId = null;
 let contextLimitRelaunches = 0;
@@ -441,9 +469,17 @@ process.on("SIGINT", async () => {
 log(`headless-auto start cwd=${cwd} model=${session.model?.provider ?? "unknown"}/${session.model?.id ?? "unknown"}`);
 let initialPromptOk = await promptAuto(session, "initial");
 if (!initialPromptOk) {
+  if (pendingUsageLimitWait) {
+    log(`headless-auto exit usage-limit-wait retry_at=${pendingUsageLimitWait.retryAt}`);
+    await cleanupAndExit(0);
+  }
   await resetSession("initial-retry");
   initialPromptOk = await promptAuto(session, "initial-retry");
   if (!initialPromptOk) {
+    if (pendingUsageLimitWait) {
+      log(`headless-auto exit usage-limit-wait retry_at=${pendingUsageLimitWait.retryAt}`);
+      await cleanupAndExit(0);
+    }
     log("headless-auto exit initial-prompt-failed");
     await cleanupAndExit(1);
   }
@@ -469,6 +505,11 @@ while (true) {
   const phase = state?.phase ?? "unknown";
   const activeTask = state?.activeTask ?? "none";
   log(`heartbeat lock=${lockPresent} streaming=${streaming} phase=${phase} task=${activeTask}`);
+
+  if (pendingUsageLimitWait) {
+    log(`headless-auto exit usage-limit-wait retry_at=${pendingUsageLimitWait.retryAt} phase=${phase} task=${activeTask}`);
+    await cleanupAndExit(0);
+  }
 
   if (lockPresent || streaming) {
     const idleMs = Date.now() - lastActivityAt;

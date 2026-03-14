@@ -26,6 +26,8 @@ process.env.GSD_CODING_AGENT_DIR = agentDir
 // Prepending gsd's node_modules to NODE_PATH fixes this for all extensions.
 const gsdRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const gsdNodeModules = join(gsdRoot, 'node_modules')
+process.env.GSD_PACKAGE_ROOT = gsdRoot
+process.env.GSD_AGENT_DIR = agentDir
 process.env.NODE_PATH = process.env.NODE_PATH
   ? `${gsdNodeModules}:${process.env.NODE_PATH}`
   : gsdNodeModules
@@ -65,6 +67,8 @@ process.env.GSD_BUNDLED_EXTENSION_PATHS = [
   join(agentDir, 'extensions', 'bg-shell', 'index.ts'),
   join(agentDir, 'extensions', 'browser-tools', 'index.ts'),
   join(agentDir, 'extensions', 'context7', 'index.ts'),
+  join(agentDir, 'extensions', 'codex-image', 'index.ts'),
+  join(agentDir, 'extensions', 'google-image', 'index.ts'),
   join(agentDir, 'extensions', 'google-search', 'index.ts'),
   join(agentDir, 'extensions', 'mcporter', 'index.ts'),
   join(agentDir, 'extensions', 'search-the-web', 'index.ts'),

@@ -82,6 +82,7 @@ export function loadStoredEnvKeys(authStorage: AuthStorage): void {
     ['brave',         'BRAVE_API_KEY'],
     ['brave_answers', 'BRAVE_ANSWERS_KEY'],
     ['context7',      'CONTEXT7_API_KEY'],
+    ['gemini',        'GEMINI_API_KEY'],
     ['jina',          'JINA_API_KEY'],
     ['tavily',        'TAVILY_API_KEY'],
     ['slack_bot',     'SLACK_BOT_TOKEN'],
@@ -97,6 +98,16 @@ export function loadStoredEnvKeys(authStorage: AuthStorage): void {
   }
 }
 
+function setStoredApiKey(authStorage: AuthStorage, provider: string, key: string): void {
+  authStorage.remove(provider)
+  authStorage.set(provider, { type: 'api_key', key })
+}
+
+function clearStoredApiKey(authStorage: AuthStorage, provider: string, envVar: string): void {
+  authStorage.remove(provider)
+  delete process.env[envVar]
+}
+
 // ─── Wizard ───────────────────────────────────────────────────────────────────
 
 interface ApiKeyConfig {
@@ -109,25 +120,18 @@ interface ApiKeyConfig {
 
 const API_KEYS: ApiKeyConfig[] = [
   {
-    provider:    'brave',
-    envVar:      'BRAVE_API_KEY',
-    label:       'Brave Search',
-    hint:        '(search-the-web + search_and_read tools)',
-    description: 'Web search and page extraction',
-  },
-  {
-    provider:    'brave_answers',
-    envVar:      'BRAVE_ANSWERS_KEY',
-    label:       'Brave Answers',
-    hint:        '(AI-summarised search answers)',
-    description: 'AI-generated search summaries',
-  },
-  {
     provider:    'context7',
     envVar:      'CONTEXT7_API_KEY',
     label:       'Context7',
     hint:        '(up-to-date library docs)',
     description: 'Live library and framework documentation',
+  },
+  {
+    provider:    'gemini',
+    envVar:      'GEMINI_API_KEY',
+    label:       'Google Gemini',
+    hint:        '(google_search + google_generate_image)',
+    description: 'Google Gemini API for search and image generation',
   },
   {
     provider:    'jina',
@@ -148,9 +152,8 @@ const API_KEYS: ApiKeyConfig[] = [
 /**
  * Check for missing optional tool API keys and prompt for them if on a TTY.
  *
- * Anthropic auth is handled by pi's own OAuth/API key flow — we don't touch it.
- * This wizard only collects Brave Search, Context7, and Jina keys which are needed
- * for web search and documentation tools.
+ * LLM auth and web search are handled by onboarding/config.
+ * This residual wizard only covers optional extra tools not covered there.
  */
 export async function runWizardIfNeeded(authStorage: AuthStorage): Promise<void> {
   const missing = API_KEYS.filter(
@@ -181,12 +184,12 @@ export async function runWizardIfNeeded(authStorage: AuthStorage): Promise<void>
   for (const key of missing) {
     const value = await promptMasked(key.label, key.hint)
     if (value.trim()) {
-      authStorage.set(key.provider, { type: 'api_key', key: value.trim() })
+      setStoredApiKey(authStorage, key.provider, value.trim())
       process.env[key.envVar] = value.trim()
       process.stdout.write(`  ${green}✓${reset} ${key.label} saved\n\n`)
       savedCount++
     } else {
-      authStorage.set(key.provider, { type: 'api_key', key: '' })
+      clearStoredApiKey(authStorage, key.provider, key.envVar)
       process.stdout.write(`  ${dim}↷  ${key.label} skipped${reset}\n\n`)
     }
   }
