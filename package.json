@@ -12,12 +12,16 @@
     "url": "https://github.com/glittercowboy/gsd-pi/issues"
   },
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "gsd": "dist/loader.js",
     "gsd-cli": "dist/loader.js"
   },
   "files": [
     "dist",
+    "packages",
     "patches",
     "pkg",
     "src/resources",
@@ -36,31 +40,49 @@
     "node": ">=20.6.0"
   },
   "scripts": {
-    "build": "tsc && npm run copy-themes",
+    "build": "npm run build:native-pkg && tsc && npm run copy-themes",
     "auto:headless": "node scripts/headless-auto.mjs",
     "auto:monitor": "bash scripts/auto-monitor.sh",
     "auto:tmux": "bash scripts/auto-tmux.sh",
+    "build:native-pkg": "npm run build -w @gsd/native",
+    "build:native": "node native/scripts/build.js",
+    "build:native:dev": "node native/scripts/build.js --dev",
     "copy-themes": "node -e \"const{mkdirSync,cpSync}=require('fs');const{resolve}=require('path');const src=resolve(__dirname,'node_modules/@mariozechner/pi-coding-agent/dist/modes/interactive/theme');mkdirSync('pkg/dist/modes/interactive/theme',{recursive:true});cpSync(src,'pkg/dist/modes/interactive/theme',{recursive:true})\"",
     "test:unit": "node scripts/run-tests.mjs unit",
     "test:integration": "node scripts/run-tests.mjs integration",
+    "test:native": "npm run build:native:dev && npm run build:native-pkg && node --test packages/native/src/__tests__/truncate.test.mjs packages/native/src/__tests__/xxhash.test.mjs",
     "test": "node scripts/run-tests.mjs all",
     "dev": "tsc --watch",
     "postinstall": "node scripts/postinstall.js",
     "sync-pkg-version": "node scripts/sync-pkg-version.cjs",
-    "prepublishOnly": "npm run sync-pkg-version && npm run build"
+    "sync-platform-versions": "node native/scripts/sync-platform-versions.cjs",
+    "prepublishOnly": "npm run sync-pkg-version && npm run sync-platform-versions && git diff --exit-code || (echo 'ERROR: version sync changed files — commit them before publishing' && exit 1) && npm run build"
   },
   "dependencies": {
     "@google/genai": "^1.22.0",
+    "@gsd/native": "*",
     "@clack/prompts": "^1.1.0",
     "@mariozechner/pi-coding-agent": "^0.57.1",
+    "better-sqlite3": "^12.4.1",
     "picomatch": "^2.3.1",
     "picocolors": "^1.1.1",
     "playwright": "^1.58.2"
   },
+  "bundleDependencies": [
+    "@gsd/native"
+  ],
   "devDependencies": {
     "@types/node": "^22.0.0",
     "patch-package": "^8.0.1",
     "typescript": "^5.4.0"
+  },
+  "optionalDependencies": {
+    "@gsd-build/engine-darwin-arm64": ">=2.10.2",
+    "@gsd-build/engine-darwin-x64": ">=2.10.2",
+    "@gsd-build/engine-linux-arm64-gnu": ">=2.10.2",
+    "@gsd-build/engine-linux-x64-gnu": ">=2.10.2",
+    "@gsd-build/engine-win32-x64-msvc": ">=2.10.2",
+    "fsevents": "~2.3.3"
   },
   "overrides": {
     "gaxios": "7.1.4"

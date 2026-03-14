@@ -830,6 +830,53 @@ index ca66444..baaa765 100644
  }
 -//# sourceMappingURL=auth-storage.js.map
 \ No newline at end of file
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/bash-executor.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/bash-executor.js
+index d3e8417..8336f97 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/core/bash-executor.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/bash-executor.js
+@@ -10,8 +10,8 @@ import { createWriteStream } from "node:fs";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import { spawn } from "child_process";
+-import stripAnsi from "strip-ansi";
+-import { getShellConfig, getShellEnv, killProcessTree, sanitizeBinaryOutput } from "../utils/shell.js";
++import { processStreamChunk } from "@gsd/native";
++import { getShellConfig, getShellEnv, killProcessTree } from "../utils/shell.js";
+ import { DEFAULT_MAX_BYTES, truncateTail } from "./tools/truncate.js";
+ // ============================================================================
+ // Implementation
+@@ -66,11 +66,12 @@ export function executeBash(command, options) {
+             }
+             options.signal.addEventListener("abort", abortHandler, { once: true });
+         }
+-        const decoder = new TextDecoder();
++        let streamState;
+         const handleData = (data) => {
+             totalBytes += data.length;
+-            // Sanitize once at the source: strip ANSI, replace binary garbage, normalize newlines
+-            const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(data, { stream: true }))).replace(/\r/g, "");
++            const result = processStreamChunk(data, streamState);
++            streamState = result.state;
++            const text = result.text;
+             // Start writing to temp file if exceeds threshold
+             if (totalBytes > DEFAULT_MAX_BYTES && !tempFilePath) {
+                 const id = randomBytes(8).toString("hex");
+@@ -142,11 +143,12 @@ export async function executeBashWithOperations(command, cwd, operations, option
+     let tempFilePath;
+     let tempFileStream;
+     let totalBytes = 0;
+-    const decoder = new TextDecoder();
++    let streamState;
+     const onData = (data) => {
+         totalBytes += data.length;
+-        // Sanitize: strip ANSI, replace binary garbage, normalize newlines
+-        const text = sanitizeBinaryOutput(stripAnsi(decoder.decode(data, { stream: true }))).replace(/\r/g, "");
++        const result = processStreamChunk(data, streamState);
++        streamState = result.state;
++        const text = result.text;
+         // Start writing to temp file if exceeds threshold
+         if (totalBytes > DEFAULT_MAX_BYTES && !tempFilePath) {
+             const id = randomBytes(8).toString("hex");
 diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/blob-store.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/blob-store.js
 new file mode 100644
 index 0000000..42e45c7
@@ -949,6 +996,27 @@ index a8f7acc..7e3726a 100644
      }
      /**
       * Check if a model is using OAuth credentials (subscription).
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/model-resolver.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/model-resolver.js
+index 55800be..520ab0b 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/core/model-resolver.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/model-resolver.js
+@@ -174,6 +174,16 @@ export async function resolveModelScope(patterns, modelRegistry) {
+     const availableModels = await modelRegistry.getAvailable();
+     const scopedModels = [];
+     for (const pattern of patterns) {
++        const exactResult = parseModelPattern(pattern, availableModels);
++        if (exactResult.model) {
++            if (exactResult.warning) {
++                console.warn(chalk.yellow(`Warning: ${exactResult.warning}`));
++            }
++            if (!scopedModels.find((sm) => modelsAreEqual(sm.model, exactResult.model))) {
++                scopedModels.push({ model: exactResult.model, thinkingLevel: exactResult.thinkingLevel });
++            }
++            continue;
++        }
+         // Check if pattern contains glob characters
+         if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
+             // Extract optional thinking level suffix (e.g., "provider/*:high")
 diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/session-manager.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/session-manager.js
 index d0cdaf5..7ceb9cb 100644
 --- a/node_modules/@mariozechner/pi-coding-agent/dist/core/session-manager.js
@@ -1148,6 +1216,67 @@ index d0cdaf5..7ceb9cb 100644
              }
          }
          return new SessionManager(targetCwd, dir, newSessionFile, true);
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/settings-manager.d.ts b/node_modules/@mariozechner/pi-coding-agent/dist/core/settings-manager.d.ts
+index 86f4015..5a77411 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/core/settings-manager.d.ts
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/settings-manager.d.ts
+@@ -31,6 +31,14 @@ export interface ThinkingBudgetsSettings {
+ export interface MarkdownSettings {
+     codeBlockIndent?: string;
+ }
++export interface MemorySettings {
++    enabled?: boolean;
++    maxRolloutsPerStartup?: number;
++    maxRolloutAgeDays?: number;
++    minRolloutIdleHours?: number;
++    stage1Concurrency?: number;
++    summaryInjectionTokenLimit?: number;
++}
+ export type TransportSetting = Transport;
+ /**
+  * Package source for npm/git packages.
+@@ -77,6 +85,7 @@ export interface Settings {
+     autocompleteMaxVisible?: number;
+     showHardwareCursor?: boolean;
+     markdown?: MarkdownSettings;
++    memory?: MemorySettings;
+ }
+ export type SettingsScope = "global" | "project";
+ export interface SettingsStorage {
+@@ -228,5 +237,13 @@ export declare class SettingsManager {
+     getAutocompleteMaxVisible(): number;
+     setAutocompleteMaxVisible(maxVisible: number): void;
+     getCodeBlockIndent(): string;
++    getMemorySettings(): {
++        enabled: boolean;
++        maxRolloutsPerStartup: number;
++        maxRolloutAgeDays: number;
++        minRolloutIdleHours: number;
++        stage1Concurrency: number;
++        summaryInjectionTokenLimit: number;
++    };
+ }
+ //# sourceMappingURL=settings-manager.d.ts.map
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/settings-manager.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/settings-manager.js
+index afff523..1598cbb 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/core/settings-manager.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/settings-manager.js
+@@ -687,5 +687,15 @@ export class SettingsManager {
+     getCodeBlockIndent() {
+         return this.settings.markdown?.codeBlockIndent ?? "  ";
+     }
++    getMemorySettings() {
++        return {
++            enabled: this.settings.memory?.enabled ?? false,
++            maxRolloutsPerStartup: this.settings.memory?.maxRolloutsPerStartup ?? 64,
++            maxRolloutAgeDays: this.settings.memory?.maxRolloutAgeDays ?? 30,
++            minRolloutIdleHours: this.settings.memory?.minRolloutIdleHours ?? 12,
++            stage1Concurrency: this.settings.memory?.stage1Concurrency ?? 8,
++            summaryInjectionTokenLimit: this.settings.memory?.summaryInjectionTokenLimit ?? 5000,
++        };
++    }
+ }
+ //# sourceMappingURL=settings-manager.js.map
 diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/bash.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/bash.js
 index 27fe820..d6bcc1a 100644
 --- a/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/bash.js
@@ -1313,6 +1442,179 @@ index 27fe820..d6bcc1a 100644
                      }
                      // Combine all buffered chunks for error output
                      const fullBuffer = Buffer.concat(chunks);
+diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/truncate.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/truncate.js
+index f491257..bf26d93 100644
+--- a/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/truncate.js
++++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/tools/truncate.js
+@@ -7,6 +7,7 @@
+  *
+  * Never returns partial lines (except bash tail truncation edge case).
+  */
++import { truncateHead as nativeKeepEnd, truncateTail as nativeKeepStart } from "@gsd/native";
+ export const DEFAULT_MAX_LINES = 2000;
+ export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
+ export const GREP_MAX_LINE_LENGTH = 500; // Max chars per grep match line
+@@ -24,6 +25,54 @@ export function formatSize(bytes) {
+         return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+     }
+ }
++function countOutputLines(text) {
++    if (text.length === 0) {
++        return 0;
++    }
++    return text.split("\n").length;
++}
++function useNativeHead(content, maxBytes, totalLines, totalBytes, maxLines) {
++    const result = nativeKeepStart(content, maxBytes);
++    const outputLines = countOutputLines(result.text);
++    if (outputLines > maxLines) {
++        return null;
++    }
++    const outputBytes = Buffer.byteLength(result.text, "utf-8");
++    return {
++        content: result.text,
++        truncated: result.truncated,
++        truncatedBy: result.truncated ? "bytes" : null,
++        totalLines,
++        totalBytes,
++        outputLines,
++        outputBytes,
++        lastLinePartial: false,
++        firstLineExceedsLimit: false,
++        maxLines,
++        maxBytes,
++    };
++}
++function useNativeTail(content, maxBytes, totalLines, totalBytes, maxLines) {
++    const result = nativeKeepEnd(content, maxBytes);
++    const outputLines = countOutputLines(result.text);
++    if (outputLines > maxLines) {
++        return null;
++    }
++    const outputBytes = Buffer.byteLength(result.text, "utf-8");
++    return {
++        content: result.text,
++        truncated: result.truncated,
++        truncatedBy: result.truncated ? "bytes" : null,
++        totalLines,
++        totalBytes,
++        outputLines,
++        outputBytes,
++        lastLinePartial: false,
++        firstLineExceedsLimit: false,
++        maxLines,
++        maxBytes,
++    };
++}
+ /**
+  * Truncate content from the head (keep first N lines/bytes).
+  * Suitable for file reads where you want to see the beginning.
+@@ -37,7 +86,6 @@ export function truncateHead(content, options = {}) {
+     const totalBytes = Buffer.byteLength(content, "utf-8");
+     const lines = content.split("\n");
+     const totalLines = lines.length;
+-    // Check if no truncation needed
+     if (totalLines <= maxLines && totalBytes <= maxBytes) {
+         return {
+             content,
+@@ -53,7 +101,6 @@ export function truncateHead(content, options = {}) {
+             maxBytes,
+         };
+     }
+-    // Check if first line alone exceeds byte limit
+     const firstLineBytes = Buffer.byteLength(lines[0], "utf-8");
+     if (firstLineBytes > maxBytes) {
+         return {
+@@ -70,13 +117,18 @@ export function truncateHead(content, options = {}) {
+             maxBytes,
+         };
+     }
+-    // Collect complete lines that fit
++    if (totalBytes > maxBytes) {
++        const nativeResult = useNativeHead(content, maxBytes, totalLines, totalBytes, maxLines);
++        if (nativeResult) {
++            return nativeResult;
++        }
++    }
+     const outputLinesArr = [];
+     let outputBytesCount = 0;
+     let truncatedBy = "lines";
+     for (let i = 0; i < lines.length && i < maxLines; i++) {
+         const line = lines[i];
+-        const lineBytes = Buffer.byteLength(line, "utf-8") + (i > 0 ? 1 : 0); // +1 for newline
++        const lineBytes = Buffer.byteLength(line, "utf-8") + (i > 0 ? 1 : 0);
+         if (outputBytesCount + lineBytes > maxBytes) {
+             truncatedBy = "bytes";
+             break;
+@@ -84,7 +136,6 @@ export function truncateHead(content, options = {}) {
+         outputLinesArr.push(line);
+         outputBytesCount += lineBytes;
+     }
+-    // If we exited due to line limit
+     if (outputLinesArr.length >= maxLines && outputBytesCount <= maxBytes) {
+         truncatedBy = "lines";
+     }
+@@ -116,7 +167,6 @@ export function truncateTail(content, options = {}) {
+     const totalBytes = Buffer.byteLength(content, "utf-8");
+     const lines = content.split("\n");
+     const totalLines = lines.length;
+-    // Check if no truncation needed
+     if (totalLines <= maxLines && totalBytes <= maxBytes) {
+         return {
+             content,
+@@ -132,18 +182,21 @@ export function truncateTail(content, options = {}) {
+             maxBytes,
+         };
+     }
+-    // Work backwards from the end
++    if (totalBytes > maxBytes) {
++        const nativeResult = useNativeTail(content, maxBytes, totalLines, totalBytes, maxLines);
++        if (nativeResult) {
++            return nativeResult;
++        }
++    }
+     const outputLinesArr = [];
+     let outputBytesCount = 0;
+     let truncatedBy = "lines";
+     let lastLinePartial = false;
+     for (let i = lines.length - 1; i >= 0 && outputLinesArr.length < maxLines; i--) {
+         const line = lines[i];
+-        const lineBytes = Buffer.byteLength(line, "utf-8") + (outputLinesArr.length > 0 ? 1 : 0); // +1 for newline
++        const lineBytes = Buffer.byteLength(line, "utf-8") + (outputLinesArr.length > 0 ? 1 : 0);
+         if (outputBytesCount + lineBytes > maxBytes) {
+             truncatedBy = "bytes";
+-            // Edge case: if we haven't added ANY lines yet and this line exceeds maxBytes,
+-            // take the end of the line (partial)
+             if (outputLinesArr.length === 0) {
+                 const truncatedLine = truncateStringToBytesFromEnd(line, maxBytes);
+                 outputLinesArr.unshift(truncatedLine);
+@@ -155,7 +208,6 @@ export function truncateTail(content, options = {}) {
+         outputLinesArr.unshift(line);
+         outputBytesCount += lineBytes;
+     }
+-    // If we exited due to line limit
+     if (outputLinesArr.length >= maxLines && outputBytesCount <= maxBytes) {
+         truncatedBy = "lines";
+     }
+@@ -175,18 +227,12 @@ export function truncateTail(content, options = {}) {
+         maxBytes,
+     };
+ }
+-/**
+- * Truncate a string to fit within a byte limit (from the end).
+- * Handles multi-byte UTF-8 characters correctly.
+- */
+ function truncateStringToBytesFromEnd(str, maxBytes) {
+     const buf = Buffer.from(str, "utf-8");
+     if (buf.length <= maxBytes) {
+         return str;
+     }
+-    // Start from the end, skip maxBytes back
+     let start = buf.length - maxBytes;
+-    // Find a valid UTF-8 boundary (start of a character)
+     while (start < buf.length && (buf[start] & 0xc0) === 0x80) {
+         start++;
+     }
 diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/index.js b/node_modules/@mariozechner/pi-coding-agent/dist/index.js
 index 50ed291..7784228 100644
 --- a/node_modules/@mariozechner/pi-coding-agent/dist/index.js

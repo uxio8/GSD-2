@@ -1,3 +1,59 @@
+diff --git a/node_modules/@mariozechner/pi-ai/dist/models.generated.d.ts b/node_modules/@mariozechner/pi-ai/dist/models.generated.d.ts
+index bbacc31..92a7c76 100644
+--- a/node_modules/@mariozechner/pi-ai/dist/models.generated.d.ts
++++ b/node_modules/@mariozechner/pi-ai/dist/models.generated.d.ts
+@@ -1719,6 +1719,23 @@ export declare const MODELS: {
+             contextWindow: number;
+             maxTokens: number;
+         };
++        readonly "claude-opus-4-6[1m]": {
++            id: string;
++            name: string;
++            api: "anthropic-messages";
++            provider: string;
++            baseUrl: string;
++            reasoning: true;
++            input: ("image" | "text")[];
++            cost: {
++                input: number;
++                output: number;
++                cacheRead: number;
++                cacheWrite: number;
++            };
++            contextWindow: number;
++            maxTokens: number;
++        };
+         readonly "claude-sonnet-4-0": {
+             id: string;
+             name: string;
+diff --git a/node_modules/@mariozechner/pi-ai/dist/models.generated.js b/node_modules/@mariozechner/pi-ai/dist/models.generated.js
+index e4398f4..a92484a 100644
+--- a/node_modules/@mariozechner/pi-ai/dist/models.generated.js
++++ b/node_modules/@mariozechner/pi-ai/dist/models.generated.js
+@@ -1721,6 +1721,23 @@ export const MODELS = {
+             contextWindow: 200000,
+             maxTokens: 128000,
+         },
++        "claude-opus-4-6[1m]": {
++            id: "claude-opus-4-6[1m]",
++            name: "Claude Opus 4.6 (1M)",
++            api: "anthropic-messages",
++            provider: "anthropic",
++            baseUrl: "https://api.anthropic.com",
++            reasoning: true,
++            input: ["text", "image"],
++            cost: {
++                input: 5,
++                output: 25,
++                cacheRead: 0.5,
++                cacheWrite: 6.25,
++            },
++            contextWindow: 1000000,
++            maxTokens: 128000,
++        },
+         "claude-sonnet-4-0": {
+             id: "claude-sonnet-4-0",
+             name: "Claude Sonnet 4 (latest)",
 diff --git a/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js b/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js
 index 6abaaa9..6f7888b 100644
 --- a/node_modules/@mariozechner/pi-ai/dist/providers/anthropic.js

@@ -4,8 +4,9 @@
 export function resolve(specifier, context, nextResolve) {
   const parentURL = context.parentURL || '';
   const isFromNodeModules = parentURL.includes('/node_modules/');
+  const isCompiledOutput = parentURL.includes('/dist/');
 
-  if (specifier.endsWith('.js') && !specifier.startsWith('node:') && !isFromNodeModules) {
+  if (specifier.endsWith('.js') && !specifier.startsWith('node:') && !isFromNodeModules && !isCompiledOutput) {
     const tsSpecifier = specifier.replace(/\.js$/, '.ts');
     try {
       return nextResolve(tsSpecifier, context);

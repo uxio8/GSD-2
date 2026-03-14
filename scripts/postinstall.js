@@ -4,6 +4,7 @@ import { exec as execCb } from 'child_process'
 import { createRequire } from 'module'
 import os from 'os'
 import { dirname, resolve } from 'path'
+import { existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -70,6 +71,22 @@ const banner =
       label: 'Patches skipped — run ' + pc.cyan('npx patch-package') + ' manually',
       ok: false,
     })
+  }
+
+  const nativeDist = resolve(cwd, 'packages', 'native', 'dist', 'index.js')
+  if (!existsSync(nativeDist)) {
+    s.start('Building native JS wrappers…')
+    const nativePkgResult = await run('npm run build:native-pkg')
+    if (nativePkgResult.ok) {
+      s.stop('Native JS wrappers ready')
+      results.push({ label: 'Native JS wrappers ready', ok: true })
+    } else {
+      s.stop(pc.yellow('Native JS wrappers — skipped (non-fatal)'))
+      results.push({
+        label: 'Native JS wrappers unavailable — run ' + pc.cyan('npm run build:native-pkg'),
+        ok: false,
+      })
+    }
   }
 
   s.start('Setting up browser tools…')
