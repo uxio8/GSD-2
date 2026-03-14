@@ -385,6 +385,29 @@ test("tarball installs and gsd binary resolves", async () => {
     assert.ok(existsSync(installedGsdExt), "bundled gsd extension present in installed package");
     const installedCiMonitor = join(tmp, "node_modules", "gsd-pi", "scripts", "ci_monitor.cjs");
     assert.ok(existsSync(installedCiMonitor), "ci_monitor present in installed package");
+
+    execFileSync("node", [
+      "--input-type=module",
+      "-e",
+      `
+        import initSqlJs from "sql.js";
+        import { createRequire } from "node:module";
+        const require = createRequire(import.meta.url);
+        const wasmPath = require.resolve("sql.js/dist/sql-wasm.wasm");
+        const SQL = await initSqlJs({ locateFile: () => wasmPath });
+        const db = new SQL.Database();
+        db.run("CREATE TABLE smoke (id INTEGER PRIMARY KEY, value TEXT)");
+        db.run("INSERT INTO smoke (value) VALUES (?)", ["ok"]);
+        const row = db.exec("SELECT value FROM smoke")[0]?.values?.[0]?.[0];
+        if (row !== "ok") {
+          throw new Error("sql.js wasm smoke failed");
+        }
+      `,
+    ], {
+      cwd: tmp,
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: MAX_BUFFER,
+    });
   } finally {
     rmSync(tarballPath, { force: true });
     rmSync(tmp, { recursive: true, force: true });

@@ -20,12 +20,40 @@ function getDbPath(): string {
 }
 
 let storageInstance: MemoryStorage | null = null;
+let storagePromise: Promise<MemoryStorage> | null = null;
+let storageDisabledForSession = false;
+let storageFailureMessage: string | null = null;
 
-function getStorage(): MemoryStorage {
-  if (!storageInstance) {
-    storageInstance = new MemoryStorage(getDbPath());
+async function getStorage(ctx?: { ui?: { notify(message: string, level: "info" | "warning" | "error"): void } }): Promise<MemoryStorage | null> {
+  if (storageDisabledForSession) {
+    return null;
   }
-  return storageInstance;
+  if (storageInstance) {
+    return storageInstance;
+  }
+  if (!storagePromise) {
+    storagePromise = MemoryStorage.create(getDbPath())
+      .then((storage) => {
+        storageInstance = storage;
+        storageFailureMessage = null;
+        return storage;
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        storageFailureMessage = message;
+        storageDisabledForSession = true;
+        storagePromise = null;
+        if (ctx?.ui) {
+          ctx.ui.notify(`Memory storage unavailable: ${message}`, "warning");
+        }
+        return Promise.reject(error);
+      });
+  }
+  try {
+    return await storagePromise;
+  } catch {
+    return null;
+  }
 }
 
 export default function memoryExtension(api: ExtensionAPI): void {
@@ -98,7 +126,11 @@ export default function memoryExtension(api: ExtensionAPI): void {
             "Delete all extracted memories for this project?",
           );
           if (confirmed) {
-            getStorage().clearForCwd(ctx.cwd);
+            const storage = await getStorage(ctx);
+            if (!storage) {
+              return;
+            }
+            storage.clearForCwd(ctx.cwd);
             if (existsSync(projectMemoryDir)) {
               rmSync(projectMemoryDir, { recursive: true, force: true });
             }
@@ -112,7 +144,11 @@ export default function memoryExtension(api: ExtensionAPI): void {
             "Re-extract all memories from session history? This may take a while.",
           );
           if (confirmed) {
-            getStorage().resetAllForCwd(ctx.cwd);
+            const storage = await getStorage(ctx);
+            if (!storage) {
+              return;
+            }
+            storage.resetAllForCwd(ctx.cwd);
             if (existsSync(projectMemoryDir)) {
               rmSync(projectMemoryDir, { recursive: true, force: true });
             }
@@ -124,7 +160,11 @@ export default function memoryExtension(api: ExtensionAPI): void {
           return;
         }
         case "stats": {
-          const stats = getStorage().getStats();
+          const storage = await getStorage(ctx);
+          if (!storage) {
+            return;
+          }
+          const stats = storage.getStats();
           api.sendMessage({
             customType: "memory:stats",
             content: [
@@ -166,6 +206,10 @@ export default function memoryExtension(api: ExtensionAPI): void {
     if (!model) {
       return;
     }
+    const storage = await getStorage(ctx);
+    if (!storage) {
+      return;
+    }
 
     const llmCall = async (
       system: string,
@@ -187,7 +231,7 @@ export default function memoryExtension(api: ExtensionAPI): void {
     };
 
     runStartup(
-      getStorage(),
+      storage,
       {
         sessionsDir: join(getAgentDir(), "sessions"),
         memoryDir,
@@ -204,6 +248,13 @@ export default function memoryExtension(api: ExtensionAPI): void {
   });
 
   api.on("before_agent_start", async (event, ctx) => {
+    if (storageDisabledForSession) {
+      if (storageFailureMessage) {
+        ctx.ui.notify(`Memory pipeline disabled for this session: ${storageFailureMessage}`, "warning");
+        storageFailureMessage = null;
+      }
+      return;
+    }
     if (!memoryDir) {
       memoryDir = getMemoryDir(ctx.cwd);
     }
@@ -221,9 +272,13 @@ export default function memoryExtension(api: ExtensionAPI): void {
   });
 
   api.on("session_shutdown", async () => {
-    if (storageInstance) {
-      storageInstance.close();
-      storageInstance = null;
+    const storage = storageInstance ?? (storagePromise ? await storagePromise.catch(() => null) : null);
+    if (storage) {
+      storage.close();
     }
+    storageInstance = null;
+    storagePromise = null;
+    storageDisabledForSession = false;
+    storageFailureMessage = null;
   });
 }
