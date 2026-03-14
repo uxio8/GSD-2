@@ -7,6 +7,7 @@ import {
   verifyExpectedArtifact,
   writeBlockerPlaceholder,
   skipExecuteTask,
+  buildLoopRemediationSteps,
 } from "../auto.ts";
 
 let passed = 0;
@@ -173,6 +174,44 @@ function cleanup(base: string): void {
   }
 }
 
+{
+  console.log("\n=== buildLoopRemediationSteps: execute-task returns concrete steps ===");
+  const base = createFixtureBase();
+  try {
+    const result = buildLoopRemediationSteps("execute-task", "M001/S01/T01", base);
+    assert(result !== null, "should return remediation steps");
+    assert(result!.includes("T01-SUMMARY.md"), "steps mention the summary file");
+    assert(result!.includes("S01-PLAN.md"), "steps mention the plan file");
+    assert(result!.includes('"- [x] **T01:"'), "steps show exact checkbox syntax");
+    assert(result!.includes("gsd doctor"), "steps mention gsd doctor");
+  } finally {
+    cleanup(base);
+  }
+}
+
+{
+  console.log("\n=== buildLoopRemediationSteps: plan-slice returns concrete steps ===");
+  const base = createFixtureBase();
+  try {
+    const result = buildLoopRemediationSteps("plan-slice", "M001/S01", base);
+    assert(result !== null, "should return remediation steps");
+    assert(result!.includes("S01-PLAN.md"), "steps mention the plan file");
+  } finally {
+    cleanup(base);
+  }
+}
+
+{
+  console.log("\n=== buildLoopRemediationSteps: unknown type returns null ===");
+  const base = createFixtureBase();
+  try {
+    const result = buildLoopRemediationSteps("unknown-type", "M001/S01", base);
+    assertEq(result, null, "unknown types return null");
+  } finally {
+    cleanup(base);
+  }
+}
+
 function createGitBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-fixmerge-test-"));
   execSync("git init -b main", { cwd: base, stdio: "ignore" });
@@ -255,6 +294,40 @@ function createGitBase(): string {
     ].join("\n") + "\n", "utf-8");
 
     assertEq(verifyExpectedArtifact("complete-slice", "M001/S01", base), false, "unchecked roadmap invalidates complete-slice");
+  } finally {
+    cleanup(base);
+  }
+}
+
+{
+  console.log("\n=== skipExecuteTask: loop-recovery writes blocker summary and marks checkbox ===");
+  const base = createFixtureBase();
+  try {
+    const planPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
+    writeFileSync(planPath, [
+      "# S01: Demo",
+      "",
+      "## Tasks",
+      "",
+      "- [ ] **T01: Demo task** `est:30m`",
+      "  Build the demo task.",
+    ].join("\n"), "utf-8");
+
+    const result = skipExecuteTask(
+      base,
+      "M001",
+      "S01",
+      "T01",
+      { summaryExists: false, taskChecked: false },
+      "loop-recovery",
+      3,
+    );
+
+    assert(result, "loop-recovery should reconcile");
+    const summaryPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T01-SUMMARY.md");
+    assert(existsSync(summaryPath), "summary placeholder should exist");
+    assert(readFileSync(summaryPath, "utf-8").includes("BLOCKER"), "summary placeholder should be a blocker");
+    assert(readFileSync(planPath, "utf-8").includes("- [x] **T01:"), "task checkbox should be marked");
   } finally {
     cleanup(base);
   }

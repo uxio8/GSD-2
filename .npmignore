@@ -1,0 +1,4 @@
+# Intentionally empty.
+#
+# This file exists so npm pack ignores .gitignore and relies on package.json
+# "files" instead. We need dist/ and packages/*/dist in the tarball.

@@ -25,6 +25,7 @@
     "patches",
     "pkg",
     "src/resources",
+    "scripts/link-workspace-packages.cjs",
     "scripts/postinstall.js",
     "scripts/run-tests.mjs",
     "scripts/ci_monitor.cjs",
@@ -52,15 +53,15 @@
     "test:integration": "node scripts/run-tests.mjs integration",
     "test:native": "npm run build:native:dev && npm run build:native-pkg && node --test packages/native/src/__tests__/truncate.test.mjs packages/native/src/__tests__/xxhash.test.mjs",
     "test": "node scripts/run-tests.mjs all",
+    "validate-pack": "bash scripts/validate-pack.sh",
     "dev": "tsc --watch",
-    "postinstall": "node scripts/postinstall.js",
+    "postinstall": "node scripts/link-workspace-packages.cjs && node scripts/postinstall.js",
     "sync-pkg-version": "node scripts/sync-pkg-version.cjs",
     "sync-platform-versions": "node native/scripts/sync-platform-versions.cjs",
-    "prepublishOnly": "npm run sync-pkg-version && npm run sync-platform-versions && git diff --exit-code || (echo 'ERROR: version sync changed files — commit them before publishing' && exit 1) && npm run build"
+    "prepublishOnly": "npm run sync-pkg-version && npm run sync-platform-versions && git diff --exit-code || (echo 'ERROR: version sync changed files — commit them before publishing' && exit 1) && npm run build && npm run validate-pack"
   },
   "dependencies": {
     "@google/genai": "^1.22.0",
-    "@gsd/native": "*",
     "@clack/prompts": "^1.1.0",
     "@mariozechner/pi-coding-agent": "^0.57.1",
     "picomatch": "^2.3.1",
@@ -68,9 +69,6 @@
     "playwright": "^1.58.2",
     "sql.js": "^1.14.1"
   },
-  "bundleDependencies": [
-    "@gsd/native"
-  ],
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/sql.js": "^1.4.9",

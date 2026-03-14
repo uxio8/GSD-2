@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { xxHash32 } from "@gsd/native/xxhash";
+import { xxHash32, xxHash32Fallback } from "@gsd/native/xxhash";
 
 /**
  * Reference values computed from the pure-JS xxHash32 implementation
@@ -81,6 +81,24 @@ describe("xxHash32 native vs JS compatibility", () => {
         expected,
         `Mismatch for "${input}" seed=${seed}: native=${actual.toString(16)} js=${expected.toString(16)}`
       );
+    });
+  }
+});
+
+describe("xxHash32Fallback (pure-JS path)", () => {
+  const testCases = [
+    ["empty string, seed 0", "", 0],
+    ["short string, seed 0", "hello", 0],
+    ["short string, seed 42", "hello", 42],
+    ["unicode", "\u{4e16}\u{754c}\u{1f600}", 0],
+    ["typical code line", "  const x = 42;", 3],
+  ];
+
+  for (const [label, input, seed] of testCases) {
+    it(`matches JS reference: ${label}`, () => {
+      const expected = jsXxHash32(input, seed);
+      const actual = xxHash32Fallback(input, seed);
+      assert.equal(actual, expected);
     });
   }
 });

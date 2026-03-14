@@ -58,6 +58,26 @@ test("commit smart-stages source changes but excludes GSD runtime files", (t) =>
   assert.deepEqual(names, ["src/app.ts"]);
 });
 
+test("commit force-adds durable .gsd planning artifacts even when .gsd is gitignored", (t) => {
+  const repo = createRepo();
+  t.after(() => rmSync(repo, { recursive: true, force: true }));
+
+  writeFileSync(join(repo, ".gitignore"), ".gsd/\n", "utf-8");
+  run("git add .gitignore", repo);
+  run("git commit -m 'chore: ignore gsd dir'", repo);
+
+  mkdirSync(join(repo, ".gsd", "milestones", "M001"), { recursive: true });
+  writeFileSync(join(repo, ".gsd", "PROJECT.md"), "# Project\n", "utf-8");
+  writeFileSync(join(repo, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "# Roadmap\n", "utf-8");
+
+  const svc = new GitServiceImpl(repo);
+  const message = svc.commit({ message: "docs: persist planning artifacts" });
+
+  assert.equal(message, "docs: persist planning artifacts");
+  const names = run("git show --pretty='' --name-only HEAD", repo).split("\n").filter(Boolean).sort();
+  assert.deepEqual(names, [".gsd/PROJECT.md", ".gsd/milestones/M001/M001-ROADMAP.md"].sort());
+});
+
 test("autoCommit excludes .gsd when passed as an extra exclusion", (t) => {
   const repo = createRepo();
   t.after(() => rmSync(repo, { recursive: true, force: true }));

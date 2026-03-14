@@ -152,6 +152,7 @@ let basePath = "";
 
 const unitDispatchCount = new Map<string, number>();
 const MAX_UNIT_DISPATCHES = 3;
+const STUB_RECOVERY_THRESHOLD = 2;
 const unitRecoveryCount = new Map<string, number>();
 const completedKeySet = new Set<string>();
 
@@ -176,6 +177,7 @@ let wrapupWarningHandle: ReturnType<typeof setTimeout> | null = null;
 let idleWatchdogHandle: ReturnType<typeof setInterval> | null = null;
 let dispatchInProgress = false;
 let dispatchQueued = false;
+let handlingAgentEnd = false;
 let sigtermHandler: (() => void) | null = null;
 const MAX_RECOVERY_INJECTION_CHARS = 50_000;
 
@@ -345,6 +347,7 @@ export async function stopAuto(ctx?: ExtensionContext, pi?: ExtensionAPI): Promi
   reuseCurrentSessionForNextDispatch = false;
   dispatchInProgress = false;
   dispatchQueued = false;
+  handlingAgentEnd = false;
   ctx?.ui.setStatus("gsd-auto", undefined);
   ctx?.ui.setWidget("gsd-progress", undefined);
   ctx?.ui.setFooter(undefined);
@@ -784,6 +787,10 @@ export async function handleAgentEnd(
   pi: ExtensionAPI,
 ): Promise<void> {
   if (!active || !cmdCtx) return;
+  if (handlingAgentEnd) return;
+  handlingAgentEnd = true;
+
+  try {
 
   // Unit completed — clear its timeout
   clearUnitTimeout();
@@ -830,6 +837,9 @@ export async function handleAgentEnd(
   }
 
   await dispatchNextUnit(ctx, pi);
+  } finally {
+    handlingAgentEnd = false;
+  }
 }
 
 async function showStepWizard(
@@ -1729,37 +1739,92 @@ async function dispatchNextUnitInner(
   const prevCount = unitDispatchCount.get(dispatchKey) ?? 0;
   if (unitType === "execute-task" && prevCount > 0) {
     const status = await inspectExecuteTaskDurability(basePath, unitId);
-    if (status?.summaryExists && !status.taskChecked) {
-      const [statusMid, statusSid, statusTid] = unitId.split("/");
-      if (statusMid && statusSid && statusTid && skipExecuteTask(
-        basePath,
-        statusMid,
-        statusSid,
-        statusTid,
-        status,
-        "execute-task summary existed without plan checkbox",
-        MAX_UNIT_DISPATCHES,
-      )) {
-        ctx.ui.notify(
-          `Self-repair: checked ${unitId} in the plan because the summary was already present.`,
-          "info",
+    const [statusMid, statusSid, statusTid] = unitId.split("/");
+    if (status && statusMid && statusSid && statusTid) {
+      if (status.summaryExists && !status.taskChecked) {
+        const repaired = skipExecuteTask(
+          basePath,
+          statusMid,
+          statusSid,
+          statusTid,
+          status,
+          "execute-task summary existed without plan checkbox",
+          MAX_UNIT_DISPATCHES,
         );
-        await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
-        await dispatchNextUnit(ctx, pi);
-        return;
+        if (repaired && verifyExpectedArtifact(unitType, unitId, basePath)) {
+          ctx.ui.notify(
+            `Self-repair: checked ${unitId} in the plan because the summary was already present.`,
+            "info",
+          );
+          await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+          await dispatchNextUnit(ctx, pi);
+          return;
+        }
+      } else if (prevCount >= STUB_RECOVERY_THRESHOLD && !status.summaryExists) {
+        const tasksDir = resolveTasksDir(basePath, statusMid, statusSid);
+        const sliceDir = resolveSlicePath(basePath, statusMid, statusSid);
+        const targetDir = tasksDir ?? (sliceDir ? join(sliceDir, "tasks") : null);
+        if (targetDir) {
+          if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true });
+          const summaryPath = join(targetDir, buildTaskFileName(statusTid, "SUMMARY"));
+          if (!existsSync(summaryPath)) {
+            const stubContent = [
+              `# PARTIAL RECOVERY — attempt ${prevCount + 1} of ${MAX_UNIT_DISPATCHES}`,
+              ``,
+              `Task \`${statusTid}\` in slice \`${statusSid}\` (milestone \`${statusMid}\`) has not yet produced a real summary.`,
+              `This placeholder was written by auto-mode after ${prevCount} dispatch attempts.`,
+              ``,
+              `The next agent session will retry this task. Replace this file with real work when done.`,
+            ].join("\n");
+            writeFileSync(summaryPath, stubContent, "utf-8");
+            ctx.ui.notify(
+              `Stub recovery (attempt ${prevCount + 1}/${MAX_UNIT_DISPATCHES}): wrote a placeholder summary for ${unitId} and will retry with recovery context.`,
+              "warning",
+            );
+          }
+        }
       }
     }
   }
   if (prevCount >= MAX_UNIT_DISPATCHES) {
+    if (unitType === "execute-task") {
+      const [statusMid, statusSid, statusTid] = unitId.split("/");
+      if (statusMid && statusSid && statusTid) {
+        const status = await inspectExecuteTaskDurability(basePath, unitId);
+        if (status) {
+          const reconciled = skipExecuteTask(
+            basePath,
+            statusMid,
+            statusSid,
+            statusTid,
+            status,
+            "loop-recovery",
+            prevCount,
+          );
+          if (reconciled && verifyExpectedArtifact(unitType, unitId, basePath)) {
+            ctx.ui.notify(
+              `Loop recovery: ${unitId} reconciled after ${prevCount + 1} dispatches. Blocker artifacts were written so the pipeline can advance.\n   Review ${status.summaryPath} and replace the placeholder with a real summary.`,
+              "warning",
+            );
+            unitDispatchCount.delete(dispatchKey);
+            await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+            await dispatchNextUnit(ctx, pi);
+            return;
+          }
+        }
+      }
+    }
+
     if (currentUnit) {
       const modelId = ctx.model?.id ?? "unknown";
       snapshotUnitMetrics(ctx, currentUnit.type, currentUnit.id, currentUnit.startedAt, modelId);
     }
     saveActivityLog(ctx, basePath, unitType, unitId);
     const expected = diagnoseExpectedArtifact(unitType, unitId, basePath);
+    const remediation = buildLoopRemediationSteps(unitType, unitId, basePath);
     await stopAuto(ctx, pi);
     ctx.ui.notify(
-      `Loop detected: ${unitType} ${unitId} dispatched ${prevCount + 1} times total. Expected artifact not found.${expected ? `\n   Expected: ${expected}` : ""}\n   Check branch state and .gsd/ artifacts.`,
+      `Loop detected: ${unitType} ${unitId} dispatched ${prevCount + 1} times total. Expected artifact not found.${expected ? `\n   Expected: ${expected}` : ""}${remediation ? `\n\n   Remediation steps:\n${remediation}` : "\n   Check branch state and .gsd/ artifacts."}`,
       "error",
     );
     return;
@@ -3217,6 +3282,48 @@ function diagnoseExpectedArtifact(unitType: string, unitId: string, base: string
       return `${relMilestoneFile(base, mid!, "SUMMARY")} (milestone summary)`;
     case "fix-merge":
       return "clean git state with no unmerged files and no pending merge metadata";
+    default:
+      return null;
+  }
+}
+
+export function buildLoopRemediationSteps(unitType: string, unitId: string, base: string): string | null {
+  const parts = unitId.split("/");
+  const mid = parts[0];
+  const sid = parts[1];
+  const tid = parts[2];
+
+  switch (unitType) {
+    case "execute-task": {
+      if (!mid || !sid || !tid) return null;
+      return [
+        `   1. Write ${relTaskFile(base, mid, sid, tid, "SUMMARY")} (even a partial summary is enough to unblock the pipeline)`,
+        `   2. Mark ${tid} [x] in ${relSliceFile(base, mid, sid, "PLAN")}: change "- [ ] **${tid}:" to "- [x] **${tid}:"`,
+        `   3. Run \`gsd doctor\` to reconcile .gsd/ state`,
+        `   4. Resume auto-mode`,
+      ].join("\n");
+    }
+    case "plan-slice":
+    case "research-slice": {
+      if (!mid || !sid) return null;
+      const artifact = unitType === "plan-slice"
+        ? relSliceFile(base, mid, sid, "PLAN")
+        : relSliceFile(base, mid, sid, "RESEARCH");
+      return [
+        `   1. Write ${artifact} manually (or in interactive mode)`,
+        `   2. Run \`gsd doctor\` to reconcile .gsd/ state`,
+        `   3. Resume auto-mode`,
+      ].join("\n");
+    }
+    case "complete-slice": {
+      if (!mid || !sid) return null;
+      return [
+        `   1. Write the slice summary and UAT file for ${sid} in ${relSlicePath(base, mid, sid)}`,
+        `   2. Mark ${sid} [x] in ${relMilestoneFile(base, mid, "ROADMAP")}`,
+        `   3. Run \`gsd doctor\` to reconcile .gsd/ state`,
+        `   4. Resume auto-mode`,
+      ].join("\n");
+    }
     default:
       return null;
   }

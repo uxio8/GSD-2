@@ -385,6 +385,23 @@ test("tarball installs and gsd binary resolves", async () => {
     assert.ok(existsSync(installedGsdExt), "bundled gsd extension present in installed package");
     const installedCiMonitor = join(tmp, "node_modules", "gsd-pi", "scripts", "ci_monitor.cjs");
     assert.ok(existsSync(installedCiMonitor), "ci_monitor present in installed package");
+    const installedNativePackage = join(tmp, "node_modules", "gsd-pi", "node_modules", "@gsd", "native", "package.json");
+    assert.ok(existsSync(installedNativePackage), "workspace native package linked in installed package");
+
+    execFileSync("node", [
+      "--input-type=module",
+      "-e",
+      `
+        import { xxHash32 } from "@gsd/native/xxhash";
+        if (typeof xxHash32 !== "function") {
+          throw new Error("linked @gsd/native package is not importable");
+        }
+      `,
+    ], {
+      cwd: join(tmp, "node_modules", "gsd-pi"),
+      stdio: ["ignore", "pipe", "pipe"],
+      maxBuffer: MAX_BUFFER,
+    });
 
     execFileSync("node", [
       "--input-type=module",

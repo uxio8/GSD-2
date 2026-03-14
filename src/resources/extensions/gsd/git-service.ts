@@ -81,6 +81,18 @@ export const RUNTIME_EXCLUSION_PATHS: readonly string[] = [
   ".gsd/STATE.md",
 ];
 
+/**
+ * Durable planning artifacts that must still be staged even when a project
+ * ignores `.gsd/` broadly. Runtime files remain excluded by the reset pass.
+ */
+const GSD_DURABLE_PATHS: readonly string[] = [
+  ".gsd/milestones/",
+  ".gsd/DECISIONS.md",
+  ".gsd/QUEUE.md",
+  ".gsd/PROJECT.md",
+  ".gsd/REQUIREMENTS.md",
+];
+
 export function runGit(
   basePath: string,
   args: string[],
@@ -134,13 +146,21 @@ export class GitServiceImpl {
   }
 
   private smartStage(extraExclusions: readonly string[] = []): void {
-    const excludes = [...RUNTIME_EXCLUSION_PATHS, ...extraExclusions]
-      .map((path) => `:(exclude)${path}`);
+    const allExclusions = [...RUNTIME_EXCLUSION_PATHS, ...extraExclusions];
+    const excludes = allExclusions.map((path) => `:(exclude)${path}`);
     try {
       this.git(["add", "-A", "--", ".", ...excludes]);
     } catch {
       console.error("GitService: smart staging failed, falling back to git add -A");
       this.git(["add", "-A"]);
+    }
+
+    for (const durablePath of GSD_DURABLE_PATHS) {
+      this.git(["add", "--force", "--", durablePath], { allowFailure: true });
+    }
+
+    for (const exclusion of allExclusions) {
+      this.git(["reset", "HEAD", "--", exclusion], { allowFailure: true });
     }
   }
 

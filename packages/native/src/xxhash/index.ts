@@ -20,7 +20,7 @@ function imul32(a: number, b: number): number {
   return Math.imul(a, b) >>> 0;
 }
 
-function xxHash32Fallback(input: string, seed: number): number {
+export function xxHash32Fallback(input: string, seed: number): number {
   const buffer = Buffer.from(input, "utf8");
   const length = buffer.length;
   let hash: number;
@@ -71,7 +71,7 @@ function xxHash32Fallback(input: string, seed: number): number {
  * @returns      32-bit unsigned hash.
  */
 export function xxHash32(input: string, seed: number): number {
-  if (!hasNativeBindings()) {
+  if (!hasNativeBindings() || typeof native.xxHash32 !== "function") {
     return xxHash32Fallback(input, seed);
   }
 

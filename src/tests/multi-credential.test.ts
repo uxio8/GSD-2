@@ -59,6 +59,17 @@ test('markUsageLimitReached backs off the current credential and rotates to an a
   assert.equal(await auth.getApiKey('anthropic'), 'key-2')
 })
 
+test('markUsageLimitReached does not back off the only credential for transport errors', async () => {
+  const auth = AuthStorage.inMemory({
+    anthropic: [
+      { type: 'api_key', key: 'key-1' },
+    ],
+  })
+
+  assert.equal(auth.markUsageLimitReached('anthropic', undefined, { errorType: 'unknown' }), false)
+  assert.equal(await auth.getApiKey('anthropic'), 'key-1')
+})
+
 test('OAuth credentials replace previous OAuth entries without multiplying them', () => {
   const auth = AuthStorage.inMemory()
 

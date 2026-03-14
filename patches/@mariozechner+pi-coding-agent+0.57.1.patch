@@ -14,7 +14,7 @@ index 51cdae9..d718c68 100644
  export function getDebugLogPath() {
      return join(getAgentDir(), `${APP_NAME}-debug.log`);
 diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
-index 90622c2..66d10e4 100644
+index 90622c2..40fc5da 100644
 --- a/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
 +++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/agent-session.js
 @@ -627,7 +627,7 @@ export class AgentSession {
@@ -117,13 +117,14 @@ index 90622c2..66d10e4 100644
      }
      /**
       * Handle retryable errors with exponential backoff.
-@@ -1836,6 +1853,28 @@ export class AgentSession {
+@@ -1836,6 +1853,29 @@ export class AgentSession {
                  this._retryResolve = resolve;
              });
          }
 +        if (this.model && message.errorMessage) {
 +            const errorType = this._classifyErrorType(message.errorMessage);
-+            const hasAlternate = this._modelRegistry.authStorage.markUsageLimitReached(this.model.provider, this.sessionId, { errorType });
++            const isCredentialError = errorType !== "unknown";
++            const hasAlternate = isCredentialError && this._modelRegistry.authStorage.markUsageLimitReached(this.model.provider, this.sessionId, { errorType });
 +            if (hasAlternate) {
 +                const messages = this.agent.state.messages;
 +                if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
@@ -146,7 +147,7 @@ index 90622c2..66d10e4 100644
          this._retryAttempt++;
          if (this._retryAttempt > settings.maxRetries) {
              // Max retries exceeded, emit final failure and reset
-@@ -1849,7 +1888,26 @@ export class AgentSession {
+@@ -1849,7 +1889,26 @@ export class AgentSession {
              this._resolveRetry(); // Resolve so waitForRetry() completes
              return false;
          }
@@ -174,7 +175,7 @@ index 90622c2..66d10e4 100644
          this._emit({
              type: "auto_retry_start",
              attempt: this._retryAttempt,
-@@ -2216,7 +2274,7 @@ export class AgentSession {
+@@ -2216,7 +2275,7 @@ export class AgentSession {
          let summaryDetails;
          if (options.summarize && entriesToSummarize.length > 0 && !extensionSummary) {
              const model = this.model;
@@ -387,7 +388,7 @@ index 544f27a..4063c3f 100644
  }
  export {};
 diff --git a/node_modules/@mariozechner/pi-coding-agent/dist/core/auth-storage.js b/node_modules/@mariozechner/pi-coding-agent/dist/core/auth-storage.js
-index ca66444..baaa765 100644
+index ca66444..c7b7e27 100644
 --- a/node_modules/@mariozechner/pi-coding-agent/dist/core/auth-storage.js
 +++ b/node_modules/@mariozechner/pi-coding-agent/dist/core/auth-storage.js
 @@ -2,16 +2,40 @@
@@ -606,7 +607,7 @@ index ca66444..baaa765 100644
      async login(providerId, callbacks) {
          const provider = getOAuthProvider(providerId);
          if (!provider) {
-@@ -302,16 +319,75 @@ export class AuthStorage {
+@@ -302,16 +319,78 @@ export class AuthStorage {
          const credentials = await provider.login(callbacks);
          this.set(providerId, { type: "oauth", ...credentials });
      }
@@ -661,6 +662,9 @@ index ca66444..baaa765 100644
 +        if (credentials.length === 0)
 +            return false;
 +        const errorType = options?.errorType ?? "rate_limit";
++        if (errorType === "unknown" && credentials.length === 1) {
++            return false;
++        }
 +        const backoffMs = getBackoffDuration(errorType);
 +        let usedIndex;
 +        if (credentials.length === 1) {
@@ -689,7 +693,7 @@ index ca66444..baaa765 100644
      async refreshOAuthTokenWithLock(providerId) {
          const provider = getOAuthProvider(providerId);
          if (!provider) {
-@@ -321,8 +397,9 @@ export class AuthStorage {
+@@ -321,8 +400,9 @@ export class AuthStorage {
              const currentData = this.parseStorageData(current);
              this.data = currentData;
              this.loadError = null;
@@ -701,7 +705,7 @@ index ca66444..baaa765 100644
                  return { result: null };
              }
              if (Date.now() < cred.expires) {
-@@ -330,17 +407,23 @@ export class AuthStorage {
+@@ -330,17 +410,23 @@ export class AuthStorage {
              }
              const oauthCreds = {};
              for (const [key, value] of Object.entries(currentData)) {
@@ -728,7 +732,7 @@ index ca66444..baaa765 100644
              };
              this.data = merged;
              this.loadError = null;
-@@ -348,72 +431,52 @@ export class AuthStorage {
+@@ -348,72 +434,52 @@ export class AuthStorage {
          });
          return result;
      }
